@@ -96,7 +96,7 @@ async function kvRequest(method, key, body){
 }
 window.storage = {
   get: (key)=> kvRequest('GET', key),
-  set: (key, value)=> kvRequest('PUT', key, value),
+  set: (key, value)=> kvRequest('POST', key, value),
   delete: (key)=> kvRequest('DELETE', key),
   list: async (prefix)=>{
     try{
@@ -729,7 +729,7 @@ async function setupCoachCode(code){
   }catch(e){ confirmed = false; }
   gateBusy = false;
   if(!confirmed){
-    gateSetupError = "Your coach code didn't save. If you saw a prompt about sharing data and declined it, that's why — this app needs permission to save shared data so you and your clients can see the same information. Please allow it, then try again.";
+    gateSetupError = "Your coach code didn't save — that's likely a temporary connection hiccup with the storage service, not something you did wrong. Please check your internet connection and try again.";
     render();
     return;
   }
