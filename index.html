@@ -79,7 +79,7 @@
 // the coach AND every client no matter what Claude plan they're on (or if they have
 // one at all). KVDB_BUCKET is filled in once during a one-time setup step below —
 // after that, this app never needs touching again.
-const KVDB_BUCKET = '';
+const KVDB_BUCKET = 'UY6gdCCZ6XiheuRaLe8Grj';
 
 async function kvRequest(method, key, body){
   const url = `https://kvdb.io/${KVDB_BUCKET}/${encodeURIComponent(key)}`;
