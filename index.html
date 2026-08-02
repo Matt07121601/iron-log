@@ -72,87 +72,56 @@
   </div>
 </div>
 
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script>
-/* ============================= STORAGE BACKEND (kvdb.io) ============================= */
+/* ============================= STORAGE BACKEND (Firebase Firestore) ============================= */
 // Claude's built-in window.storage requires every viewer to be on a paid Claude plan.
-// This app instead uses kvdb.io, a free anonymous key-value store, so it works for
-// the coach AND every client no matter what Claude plan they're on (or if they have
-// one at all). KVDB_BUCKET is filled in once during a one-time setup step below —
-// after that, this app never needs touching again.
-const KVDB_BUCKET = 'UY6gdCCZ6XiheuRaLe8Grj';
+// This app instead uses Firebase Firestore (free Spark plan, no card required) so it
+// works for the coach AND every client, on any device, with or without a Claude account.
+const firebaseConfig = {
+  apiKey: "AIzaSyD0kGUjBcHXGg9er_1n9Yb0iSc7Vlgl8EI",
+  authDomain: "ironlog-6c0ff.firebaseapp.com",
+  projectId: "ironlog-6c0ff",
+  storageBucket: "ironlog-6c0ff.firebasestorage.app",
+  messagingSenderId: "775990042723",
+  appId: "1:775990042723:web:5359ccadd1de8eac161856"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
 
-async function kvRequest(method, key, body){
-  const url = `https://kvdb.io/${KVDB_BUCKET}/${encodeURIComponent(key)}`;
-  try{
-    const opts = {method};
-    if(body!==undefined) opts.body = body;
-    const res = await fetch(url, opts);
-    if(res.status===404) return null;
-    if(!res.ok) return null;
-    if(method==='DELETE') return {key, deleted:true, shared:true};
-    const text = await res.text();
-    return {key, value:text, shared:true};
-  }catch(e){ return null; }
-}
 window.storage = {
-  get: (key)=> kvRequest('GET', key),
-  set: (key, value)=> kvRequest('POST', key, value),
-  delete: (key)=> kvRequest('DELETE', key),
+  get: async (key)=>{
+    try{
+      const snap = await db.collection('kv').doc(key).get();
+      if(!snap.exists) return null;
+      return {key, value: snap.data().value, shared:true};
+    }catch(e){ return null; }
+  },
+  set: async (key, value)=>{
+    try{
+      await db.collection('kv').doc(key).set({value});
+      return {key, value, shared:true};
+    }catch(e){ return null; }
+  },
+  delete: async (key)=>{
+    try{
+      await db.collection('kv').doc(key).delete();
+      return {key, deleted:true, shared:true};
+    }catch(e){ return null; }
+  },
   list: async (prefix)=>{
     try{
-      const res = await fetch(`https://kvdb.io/${KVDB_BUCKET}/?prefix=${encodeURIComponent(prefix||'')}`);
-      if(!res.ok) return null;
-      const text = await res.text();
-      const keys = text.split('\n').filter(Boolean);
+      const p = prefix || '';
+      const snap = await db.collection('kv')
+        .where(firebase.firestore.FieldPath.documentId(), '>=', p)
+        .where(firebase.firestore.FieldPath.documentId(), '<', p + '\uf8ff')
+        .get();
+      const keys = snap.docs.map(d=>d.id);
       return {keys, prefix, shared:true};
     }catch(e){ return null; }
   }
 };
-
-/* One-time storage setup screen — only ever shown if KVDB_BUCKET above is blank */
-async function runStorageSetup(){
-  const root = document.getElementById('app');
-  root.innerHTML = '';
-  const wrap = document.createElement('div');
-  wrap.className = 'pt-16 max-w-md mx-auto text-center px-4';
-  wrap.innerHTML = `
-    <div class="label mb-1">One-Time Setup</div>
-    <h1 class="font-display text-2xl font-bold mb-3">Set Up Storage</h1>
-    <p class="text-sm text-[var(--ink-2)] mb-6">This app needs a free storage space to save client data. Tap below to create one — free, no card, no account. It only needs doing once, ever.</p>
-  `;
-  const btn = document.createElement('button');
-  btn.className = 'btn btn-chalk px-6 py-3 rounded-lg w-full mb-4';
-  btn.textContent = 'Create Storage';
-  const resultBox = document.createElement('div');
-  resultBox.className = 'hidden';
-  btn.onclick = async ()=>{
-    btn.textContent = 'Creating…';
-    btn.disabled = true;
-    try{
-      const res = await fetch('https://kvdb.io/', {
-        method:'POST',
-        headers:{'Content-Type':'application/x-www-form-urlencoded'},
-        body:'email=setup@ironlogapp.local'
-      });
-      const bucketId = (await res.text()).trim();
-      resultBox.classList.remove('hidden');
-      resultBox.innerHTML = `
-        <div class="card p-4 text-left">
-          <div class="label mb-2" style="color:var(--chalk);">Storage Created ✓</div>
-          <p class="text-sm text-[var(--ink-1)] mb-3">Copy this code and paste it back into your chat with Claude — Claude will finish the setup for you and this screen will never appear again:</p>
-          <div class="font-mono text-sm bg-[var(--bg-2)] rounded-lg p-3 break-all select-all">${bucketId}</div>
-        </div>
-      `;
-      btn.classList.add('hidden');
-    }catch(e){
-      btn.textContent = 'Something went wrong — tap to try again';
-      btn.disabled = false;
-    }
-  };
-  wrap.appendChild(btn);
-  wrap.appendChild(resultBox);
-  root.appendChild(wrap);
-}
 
 /* ============================= MULTI-CLIENT SESSION ============================= */
 const LEGACY_KEY_PROFILE = 'profile-and-program';
@@ -729,7 +698,7 @@ async function setupCoachCode(code){
   }catch(e){ confirmed = false; }
   gateBusy = false;
   if(!confirmed){
-    gateSetupError = "Your coach code didn't save — that's likely a temporary connection hiccup with the storage service, not something you did wrong. Please check your internet connection and try again.";
+    gateSetupError = "Your coach code didn't save — check your internet connection and try again. If it keeps happening, the Firestore database rules may need to be set to allow read/write access.";
     render();
     return;
   }
@@ -2300,11 +2269,7 @@ Keep total output under 120 words. Do not mention weight loss drugs. Be encourag
 }
 
 /* ============================= INIT ============================= */
-if(KVDB_BUCKET){
-  loadAll();
-} else {
-  runStorageSetup();
-}
+loadAll();
 </script>
 </body>
 </html>
