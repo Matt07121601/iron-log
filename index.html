@@ -1801,16 +1801,111 @@ function renderTracker(){
   list.appendChild(el(`<div class="label mb-2">Today's Entries</div>`));
   if(todayFood.length===0){ list.appendChild(el(`<div class="text-sm text-[var(--ink-2)]">Nothing logged yet today.</div>`)); }
   todayFood.forEach((f,idx)=>{
-    const row = el(`<div class="flex justify-between items-center py-2 border-b border-[var(--line)] last:border-0"></div>`);
-    row.appendChild(el(`<div><div class="text-sm font-medium">${f.name}</div><div class="text-xs font-mono text-[var(--ink-2)]">${f.cals}kcal · P${f.protein} C${f.carbs} F${f.fat}</div></div>`));
-    const del = el(`<button class="text-xs text-[var(--alert)]">Remove</button>`);
-    del.onclick = ()=>{ state.logs.food[todayISO()].splice(idx,1); queueSave(); render(); };
-    row.appendChild(del);
+    const row = el(`<div class="py-2 border-b border-[var(--line)] last:border-0"></div>`);
+    if(editingFoodIndex===idx){
+      row.appendChild(renderFoodEditRow(f, idx));
+    } else {
+      const topRow = el(`<div class="flex justify-between items-center gap-2"></div>`);
+      topRow.appendChild(el(`<div class="min-w-0"><div class="text-sm font-medium truncate">${f.name}</div><div class="text-xs font-mono text-[var(--ink-2)]">${f.cals}kcal · P${f.protein} C${f.carbs} F${f.fat}</div></div>`));
+      const btnGroup = el(`<div class="flex gap-3 shrink-0"></div>`);
+      const editBtn = el(`<button class="text-xs text-[var(--ink-2)] hover:text-[var(--chalk)]">Edit</button>`);
+      editBtn.onclick = ()=>{ editingFoodIndex=idx; render(); };
+      const del = el(`<button class="text-xs text-[var(--alert)]">Remove</button>`);
+      del.onclick = ()=>{ state.logs.food[todayISO()].splice(idx,1); queueSave(); render(); };
+      btnGroup.appendChild(editBtn); btnGroup.appendChild(del);
+      topRow.appendChild(btnGroup);
+      row.appendChild(topRow);
+    }
     list.appendChild(row);
   });
   wrap.appendChild(list);
 
   return wrap;
+}
+
+/* ---- Editing an already-logged food entry ---- */
+let editingFoodIndex = null;
+function renderFoodEditRow(f, idx){
+  const box = el(`<div class="mt-2 p-3 rounded-lg border border-[var(--line)] bg-[var(--bg-2)]"></div>`);
+
+  if(f.per100){
+    // Entry came from search/scan — we know its per-100 rate, so editing the
+    // amount just rescales cals/protein/carbs/fat rather than needing manual re-entry.
+    box.appendChild(el(`<div class="font-medium text-sm mb-2">${f.baseName || f.name}</div>`));
+    let selectedUnit = f.unit || 'g';
+    const row = el(`<div class="flex items-center gap-2 mb-2"></div>`);
+    const qtyInput = el(`<input type="number" value="${f.qty}" class="w-24">`);
+    row.appendChild(qtyInput);
+    const unitToggle = el(`<div class="flex gap-1 text-xs"></div>`);
+    ['g','ml'].forEach(u=>{
+      const b = el(`<button type="button" class="px-2.5 py-1.5 rounded ${selectedUnit===u?'btn-chalk':'btn-ghost'}">${u}</button>`);
+      b.onclick = ()=>{
+        selectedUnit = u;
+        Array.from(unitToggle.children).forEach(child=>{
+          child.className = `px-2.5 py-1.5 rounded ${child.textContent===u?'btn-chalk':'btn-ghost'}`;
+        });
+      };
+      unitToggle.appendChild(b);
+    });
+    row.appendChild(unitToggle);
+    box.appendChild(row);
+    const preview = el(`<div class="font-mono text-xs text-[var(--ink-1)] mb-3"></div>`);
+    function updatePreview(){
+      const qty = parseFloat(qtyInput.value)||0;
+      const m = scaleMacros(f.per100, qty);
+      preview.textContent = `${Math.round(m.cals)} kcal · P${fmt1(m.protein)}g C${fmt1(m.carbs)}g F${fmt1(m.fat)}g`;
+    }
+    qtyInput.oninput = updatePreview;
+    updatePreview();
+    box.appendChild(preview);
+    const btnRow = el(`<div class="flex gap-2"></div>`);
+    const saveBtn = el(`<button class="btn btn-chalk px-4 py-2 rounded-lg text-xs flex-1">Save</button>`);
+    saveBtn.onclick = ()=>{
+      const qty = parseFloat(qtyInput.value)||0;
+      const unit = selectedUnit;
+      const m = scaleMacros(f.per100, qty);
+      f.qty = qty;
+      f.unit = unit;
+      f.name = `${f.baseName} (${qty}${unit})`;
+      f.cals = Math.round(m.cals);
+      f.protein = fmt1(m.protein);
+      f.carbs = fmt1(m.carbs);
+      f.fat = fmt1(m.fat);
+      editingFoodIndex = null;
+      queueSave(); render();
+    };
+    const cancelBtn = el(`<button class="btn btn-ghost px-4 py-2 rounded-lg text-xs">Cancel</button>`);
+    cancelBtn.onclick = ()=>{ editingFoodIndex=null; render(); };
+    btnRow.appendChild(saveBtn); btnRow.appendChild(cancelBtn);
+    box.appendChild(btnRow);
+  } else {
+    // Manually-entered item — no per-100 rate to scale from, so edit the numbers directly.
+    box.appendChild(el(`<div class="text-xs text-[var(--ink-2)] mb-2">Manually entered — edit values directly</div>`));
+    const form = el(`<div class="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-3"></div>`);
+    const nameIn = el(`<input value="${f.name}" placeholder="Food name" class="sm:col-span-1 col-span-2">`);
+    const calIn = el(`<input type="number" value="${f.cals}" placeholder="kcal">`);
+    const pIn = el(`<input type="number" value="${f.protein}" placeholder="Protein g">`);
+    const cIn = el(`<input type="number" value="${f.carbs}" placeholder="Carbs g">`);
+    const fIn = el(`<input type="number" value="${f.fat}" placeholder="Fat g">`);
+    form.appendChild(nameIn); form.appendChild(calIn); form.appendChild(pIn); form.appendChild(cIn); form.appendChild(fIn);
+    box.appendChild(form);
+    const btnRow = el(`<div class="flex gap-2"></div>`);
+    const saveBtn = el(`<button class="btn btn-chalk px-4 py-2 rounded-lg text-xs flex-1">Save</button>`);
+    saveBtn.onclick = ()=>{
+      f.name = nameIn.value || f.name;
+      f.cals = parseFloat(calIn.value)||0;
+      f.protein = parseFloat(pIn.value)||0;
+      f.carbs = parseFloat(cIn.value)||0;
+      f.fat = parseFloat(fIn.value)||0;
+      editingFoodIndex = null;
+      queueSave(); render();
+    };
+    const cancelBtn = el(`<button class="btn btn-ghost px-4 py-2 rounded-lg text-xs">Cancel</button>`);
+    cancelBtn.onclick = ()=>{ editingFoodIndex=null; render(); };
+    btnRow.appendChild(saveBtn); btnRow.appendChild(cancelBtn);
+    box.appendChild(btnRow);
+  }
+  return box;
 }
 
 /* ---- Local offline food database (fallback when the live database is unreachable) ---- */
@@ -1938,10 +2033,22 @@ function renderQtyPanel(){
   const sel = state.foodSearch.selected;
   const box = el(`<div class="mt-3 p-3 rounded-lg border border-[var(--line)] bg-[var(--bg-2)]"></div>`);
   box.appendChild(el(`<div class="font-medium text-sm mb-2">${sel.name}${sel.brand? ' · '+sel.brand:''}</div>`));
+  let selectedUnit = state.foodSearch.unit || 'g';
   const row = el(`<div class="flex items-center gap-2 mb-2"></div>`);
   const qtyInput = el(`<input type="number" value="${state.foodSearch.qty||100}" class="w-24">`);
   row.appendChild(qtyInput);
-  row.appendChild(el(`<span class="text-xs text-[var(--ink-2)]">grams</span>`));
+  const unitToggle = el(`<div class="flex gap-1 text-xs"></div>`);
+  ['g','ml'].forEach(u=>{
+    const b = el(`<button type="button" class="px-2.5 py-1.5 rounded ${selectedUnit===u?'btn-chalk':'btn-ghost'}">${u}</button>`);
+    b.onclick = ()=>{
+      selectedUnit = u;
+      Array.from(unitToggle.children).forEach(child=>{
+        child.className = `px-2.5 py-1.5 rounded ${child.textContent===u?'btn-chalk':'btn-ghost'}`;
+      });
+    };
+    unitToggle.appendChild(b);
+  });
+  row.appendChild(unitToggle);
   box.appendChild(row);
   const preview = el(`<div class="font-mono text-xs text-[var(--ink-1)] mb-3"></div>`);
   function updatePreview(){
@@ -1957,11 +2064,13 @@ function renderQtyPanel(){
   const addBtn = el(`<button class="btn btn-chalk px-4 py-2 rounded-lg text-xs flex-1">Add to Log</button>`);
   addBtn.onclick = ()=>{
     const qty = parseFloat(qtyInput.value)||0;
+    const unit = selectedUnit;
+    const baseName = `${sel.name}${sel.brand? ' · '+sel.brand:''}`;
     const m = scaleMacros(sel.per100, qty);
     if(!state.logs.food[todayISO()]) state.logs.food[todayISO()]=[];
     state.logs.food[todayISO()].push({
-      name:`${sel.name} (${qty}g)`, cals:Math.round(m.cals),
-      protein:fmt1(m.protein), carbs:fmt1(m.carbs), fat:fmt1(m.fat)
+      name:`${baseName} (${qty}${unit})`, baseName, per100:sel.per100, qty, unit,
+      cals:Math.round(m.cals), protein:fmt1(m.protein), carbs:fmt1(m.carbs), fat:fmt1(m.fat)
     });
     state.foodSearch.selected=null; state.foodSearch.query=''; state.foodSearch.results=[]; state.foodSearch.scanError=null;
     queueSave(); render();
