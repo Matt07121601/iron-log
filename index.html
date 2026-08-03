@@ -194,8 +194,16 @@ let state = {
     goal:'', work:'', activityLevel:'', daysPerWeek:4, sessionMins:60, trainingTime:'AM',
     equipment:'', equipmentNotes:'', dietaryRestrictions:'', dietaryLikes:'', dietaryDislikes:''
   },
-  photos:{front:null, side:null, rear:null, target:null},
-  analysis:{status:'idle', result:null},
+  photos:{
+    baseline:{front:null, side:null, rear:null},
+    target:{front:null, side:null, rear:null},
+    checkins:[]   // [{id, date, front, side, rear}]
+  },
+  analysis:{
+    baseline:{status:'idle', result:null},
+    checkins:{}   // keyed by checkin id -> {status, result}
+  },
+  notifications:[], // [{id, date, title, message, read}]
   program:null,
   targets:null,
   view:'dashboard',
@@ -221,7 +229,7 @@ async function saveAll(){
     await window.storage.set(clientDataKey(session.clientId), JSON.stringify({
       profile:state.profile, program:state.program, targets:state.targets,
       analysis:state.analysis, onboarded:state.onboarded, photos:state.photos,
-      logs:state.logs
+      logs:state.logs, notifications:state.notifications
     }), true);
   }catch(e){ console.error('Save failed', e); }
 }
@@ -270,8 +278,16 @@ function freshClientState(){
       goal:'', work:'', activityLevel:'', daysPerWeek:4, sessionMins:60, trainingTime:'AM',
       equipment:'', equipmentNotes:'', dietaryRestrictions:'', dietaryLikes:'', dietaryDislikes:''
     },
-    photos:{front:null, side:null, rear:null, target:null},
-    analysis:{status:'idle', result:null},
+    photos:{
+      baseline:{front:null, side:null, rear:null},
+      target:{front:null, side:null, rear:null},
+      checkins:[]
+    },
+    analysis:{
+      baseline:{status:'idle', result:null},
+      checkins:{}
+    },
+    notifications:[],
     program:null, targets:null, view:'dashboard', activeDayIndex:0,
     quoteQueue:[], showingQuoteFor:null,
     foodSearch:{mode:'search', query:'', results:[], selected:null, qty:100, scanError:null, usedFallback:false},
@@ -376,6 +392,38 @@ function resizeImageFile(file, maxDim=640){
     reader.readAsDataURL(file);
   });
 }
+
+/* ---- Shared photo upload slot (used in onboarding and the Photos tab) ---- */
+// bodyPhotoDisclaimer: shown on every slot that captures the client's own body,
+// to be explicit and unambiguous that this must never be a nude photo.
+const BODY_PHOTO_DISCLAIMER = 'Do not upload nude photos. Wear suitable clothing (e.g. swim shorts or a bikini) so your frame and muscle can be assessed, and keep your head/face out of frame.';
+function renderPhotoUploadSlot(opts){
+  // opts: {label, currentDataUrl, onUpload, disclaimer, idSuffix}
+  const slot = el(`<div class="card p-3 text-center"></div>`);
+  slot.appendChild(el(`<div class="label mb-2">${opts.label}</div>`));
+  if(opts.currentDataUrl){
+    slot.appendChild(el(`<img src="${opts.currentDataUrl}" class="w-full h-40 object-cover rounded mb-2">`));
+  } else {
+    slot.appendChild(el(`<div class="w-full h-40 rounded mb-2 checker flex items-center justify-center text-xs text-[var(--ink-2)]">No photo</div>`));
+  }
+  if(opts.disclaimer){
+    slot.appendChild(el(`<p class="text-[10px] text-[var(--ink-2)] mb-2 leading-snug">${opts.disclaimer}</p>`));
+  }
+  const inputId = 'photo-upload-'+(opts.idSuffix||Math.random().toString(36).slice(2));
+  const inp = el(`<input type="file" accept="image/*" id="${inputId}" class="hidden">`);
+  inp.onchange = async (e)=>{
+    const f = e.target.files[0];
+    if(!f) return;
+    const dataUrl = await resizeImageFile(f);
+    opts.onUpload(dataUrl);
+  };
+  slot.appendChild(inp);
+  const btn = el(`<button class="btn btn-ghost text-xs px-3 py-1.5 rounded w-full">${opts.currentDataUrl?'Replace':'Upload'}</button>`);
+  btn.onclick = ()=> inp.click();
+  slot.appendChild(btn);
+  return slot;
+}
+
 
 /* ============================= CALCULATIONS ============================= */
 const ACTIVITY_MULT = {
@@ -734,7 +782,7 @@ async function submitCode(code){
 function logoutSession(){
   session = {role:null, clientId:null, clientName:null, viewingAsCoach:false};
   gateSubmitError = null; gateSetupError = null; gateError = null;
-  workoutEditMode = false;
+  workoutEditMode = false; notificationsOpen = false; newCheckinDraft = {front:null, side:null, rear:null};
   clearInterval(Timer.interval);
   $('timerBar') && $('timerBar').classList.add('hidden');
   chartInstances.forEach(c=>{ try{ c.destroy(); }catch(e){} });
@@ -746,7 +794,7 @@ function coachOpenClient(clientId, name){
   session.clientId = clientId;
   session.clientName = name;
   session.viewingAsCoach = true;
-  checkinStatus = 'idle'; checkinDraft = null; workoutEditMode = false;
+  checkinStatus = 'idle'; checkinDraft = null; workoutEditMode = false; notificationsOpen = false; newCheckinDraft = {front:null, side:null, rear:null};
   gateBusy = true; render();
   loadClientState(clientId).then(()=>{ gateBusy=false; render(); });
 }
@@ -754,7 +802,7 @@ function coachBackToDashboard(){
   session.clientId = null;
   session.clientName = null;
   session.viewingAsCoach = false;
-  checkinStatus = 'idle'; checkinDraft = null; workoutEditMode = false;
+  checkinStatus = 'idle'; checkinDraft = null; workoutEditMode = false; notificationsOpen = false; newCheckinDraft = {front:null, side:null, rear:null};
   clearInterval(Timer.interval);
   $('timerBar') && $('timerBar').classList.add('hidden');
   chartInstances.forEach(c=>{ try{ c.destroy(); }catch(e){} });
@@ -1069,11 +1117,13 @@ function renderHeader(){
         <div class="hidden sm:block text-xs font-mono text-[var(--ink-2)]">
           <span>${state.profile.goal ? goalScheme(state.profile.goal).label : ''}</span>
         </div>
+        <div id="notifBellSlot"></div>
         ${session.role==='client' ? '<button id="logoutBtn" class="btn btn-ghost text-xs px-3 py-2 rounded-lg">Log Out</button>' : ''}
         <button id="resetBtn" class="btn btn-ghost text-xs px-3 py-2 rounded-lg text-[var(--ink-2)] hover:text-[var(--alert)] hover:border-[var(--alert)]">Reset Data</button>
       </div>
     </div>
   `));
+  wrap.querySelector('#notifBellSlot').replaceWith(renderNotificationBell());
   wrap.querySelector('#resetBtn').onclick = resetAllData;
   if(session.role==='client'){ wrap.querySelector('#logoutBtn').onclick = logoutSession; }
   wrap.appendChild(el(`<div class="chalk-rule mt-4 mb-4"></div>`));
@@ -1089,7 +1139,7 @@ function renderHeader(){
 }
 
 /* ============================= ONBOARDING ============================= */
-const TOTAL_STEPS = 7;
+const TOTAL_STEPS = 8;
 let onboardError = null;
 function validateStep(step, p){
   if(step===0){
@@ -1113,7 +1163,7 @@ function validateStep(step, p){
     if(!p.sessionMins || parseInt(p.sessionMins)<=0) return 'Please enter your session length.';
     if(!p.equipment) return 'Please select your equipment access.';
   }
-  return null; // steps 2 (body type) and 6 (diet) stay optional
+  return null; // steps 2 (body type), 6 (diet) and 7 (photos) stay optional
 }
 
 const GOALS = [
@@ -1251,6 +1301,38 @@ function renderOnboarding(){
     card.appendChild(field('Foods you like', inputText(p.dietaryLikes, v=>p.dietaryLikes=v, 'e.g. chicken, rice, greek yoghurt')));
     card.appendChild(field('Foods you dislike', inputText(p.dietaryDislikes, v=>p.dietaryDislikes=v, 'e.g. mushrooms, tofu')));
   }
+  else if(state.step===7){
+    card.appendChild(el(`<h2 class="font-display text-xl mb-2">Your Photos</h2>`));
+    card.appendChild(el(`<p class="text-sm text-[var(--ink-2)] mb-4">These let your program start from where you actually are, and let you compare against where you want to get to. Full body length, three angles, no face.</p>`));
+
+    card.appendChild(el(`<div class="label mb-2">Your Current Physique</div>`));
+    const baseGrid = el(`<div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6"></div>`);
+    [['front','Front'],['side','Side'],['rear','Rear']].forEach(([key,label])=>{
+      baseGrid.appendChild(renderPhotoUploadSlot({
+        label, idSuffix:'onboard-baseline-'+key,
+        currentDataUrl: state.photos.baseline[key],
+        disclaimer: BODY_PHOTO_DISCLAIMER,
+        onUpload: (dataUrl)=>{ state.photos.baseline[key]=dataUrl; render(); }
+      }));
+    });
+    card.appendChild(baseGrid);
+
+    card.appendChild(el(`<div class="label mb-2">Your Goal Physique</div>`));
+    card.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-3">Three photos of the same person, from front/side/rear — an athlete, influencer, or fitness professional whose physique represents what you're aiming for.</p>`));
+    const targetGrid = el(`<div class="grid grid-cols-1 sm:grid-cols-3 gap-3"></div>`);
+    [['front','Front'],['side','Side'],['rear','Rear']].forEach(([key,label])=>{
+      targetGrid.appendChild(renderPhotoUploadSlot({
+        label, idSuffix:'onboard-target-'+key,
+        currentDataUrl: state.photos.target[key],
+        onUpload: (dataUrl)=>{ state.photos.target[key]=dataUrl; render(); }
+      }));
+    });
+    card.appendChild(targetGrid);
+
+    const skip = el(`<button class="text-xs text-[var(--ink-2)] underline underline-offset-2 mt-4">Skip for now — I'll add these later from the Photos tab</button>`);
+    skip.onclick = ()=>{ handleOnboardNext(); };
+    card.appendChild(skip);
+  }
 
   wrap.appendChild(card);
 
@@ -1308,6 +1390,11 @@ function handleOnboardNext(){
   state.view='dashboard';
   queueSave();
   render();
+  const hasBaseline = state.photos.baseline.front || state.photos.baseline.side || state.photos.baseline.rear;
+  const hasTarget = state.photos.target.front || state.photos.target.side || state.photos.target.rear;
+  if(hasBaseline && hasTarget){
+    runBaselineAnalysis();
+  }
 }
 
 /* ============================= DASHBOARD ============================= */
@@ -1513,6 +1600,9 @@ function renderWorkoutView(){
       wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-4">Tailored for ${btLabel}: ${notes.join(', ')}, on top of your goal and equipment. Base rep ranges and exercise selection still come primarily from your stated goal.</p>`));
     }
   }
+  if(!workoutEditMode && state.analysis.baseline.status==='done' && state.analysis.baseline.result && state.analysis.baseline.result.trainingFocus){
+    wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-4"><span style="color:var(--chalk);">From your photo comparison:</span> ${state.analysis.baseline.result.trainingFocus}</p>`));
+  }
 
   const day = state.program[state.activeDayIndex];
 
@@ -1688,7 +1778,12 @@ function renderNutrition(){
   wrap.appendChild(el(`<p class="text-sm text-[var(--ink-2)] mb-2">Based on Mifflin-St Jeor BMR, activity-adjusted TDEE, and ISSN/ACSM protein guidance (1.6–2.2g/kg bodyweight).</p>`));
   if(state.profile.bodyType){
     const btLabel = BODY_TYPES.find(b=>b.key===state.profile.bodyType).label;
-    wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-6">Deficit/surplus sizes below are nudged slightly for your selected body type (${btLabel}). This is a starting point only — the app will suggest further adjustments once it has a few weeks of your actual logged weight trend to go on.</p>`));
+    wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-3">Deficit/surplus sizes below are nudged slightly for your selected body type (${btLabel}). This is a starting point only — the app will suggest further adjustments once it has a few weeks of your actual logged weight trend to go on.</p>`));
+  } else {
+    wrap.appendChild(el(`<div class="mb-3"></div>`));
+  }
+  if(state.analysis.baseline.status==='done' && state.analysis.baseline.result && state.analysis.baseline.result.nutritionRecommendation){
+    wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-6"><span style="color:var(--chalk);">From your photo comparison:</span> ${state.analysis.baseline.result.nutritionRecommendation} <a href="#" onclick="setView('photos'); return false;" class="underline">See full analysis →</a></p>`));
   } else {
     wrap.appendChild(el(`<div class="mb-6"></div>`));
   }
@@ -2276,72 +2371,198 @@ function chartOpts(dual=false){
   return base;
 }
 
-/* ============================= PHOTOS / AI ANALYSIS ============================= */
+/* ============================= NOTIFICATIONS ============================= */
+let notificationsOpen = false;
+function addNotification(title, message){
+  state.notifications = state.notifications || [];
+  state.notifications.unshift({
+    id: genCode(8), date: todayISO(), title, message, read:false
+  });
+  queueSave();
+}
+function toggleNotifications(){
+  notificationsOpen = !notificationsOpen;
+  if(notificationsOpen){
+    (state.notifications||[]).forEach(n=> n.read=true);
+    queueSave();
+  }
+  render();
+}
+function renderNotificationBell(){
+  const unread = (state.notifications||[]).filter(n=>!n.read).length;
+  const wrap = el(`<div class="relative"></div>`);
+  const btn = el(`<button class="btn btn-ghost text-xs px-3 py-2 rounded-lg relative" title="Notifications">🔔${unread>0?`<span class="absolute -top-1.5 -right-1.5 bg-[var(--alert)] text-[#1B1B1E] text-[10px] font-bold rounded-full w-4 h-4 flex items-center justify-center">${unread>9?'9+':unread}</span>`:''}</button>`);
+  btn.onclick = toggleNotifications;
+  wrap.appendChild(btn);
+  if(notificationsOpen){
+    const panel = el(`<div class="absolute right-0 mt-2 w-72 max-h-80 overflow-y-auto card p-3 z-40 shadow-xl"></div>`);
+    panel.appendChild(el(`<div class="label mb-2">Notifications</div>`));
+    const list = state.notifications||[];
+    if(list.length===0){
+      panel.appendChild(el(`<div class="text-xs text-[var(--ink-2)]">Nothing yet.</div>`));
+    } else {
+      list.forEach(n=>{
+        const item = el(`<div class="py-2 border-b border-[var(--line)] last:border-0"></div>`);
+        item.appendChild(el(`<div class="text-xs font-mono text-[var(--ink-2)] mb-0.5">${n.date}</div>`));
+        item.appendChild(el(`<div class="text-sm font-medium mb-0.5">${n.title}</div>`));
+        item.appendChild(el(`<div class="text-xs text-[var(--ink-1)]">${n.message}</div>`));
+        panel.appendChild(item);
+      });
+    }
+    wrap.appendChild(panel);
+  }
+  return wrap;
+}
+
+/* ============================= PHOTOS / AI COMPARISON ANALYSIS ============================= */
 function renderPhotos(){
   const wrap = el(`<div></div>`);
   wrap.appendChild(el(`<h2 class="font-display text-2xl font-bold mb-1">Physique Photos</h2>`));
-  wrap.appendChild(el(`<p class="text-sm text-[var(--ink-2)] mb-2 max-w-xl">For an accurate read, photos should be taken in swimming shorts (male) or a bikini (female), full body length, in good lighting, from three angles. This gives a rough visual estimate only — not a substitute for a clinical measurement like DEXA or BodPod.</p>`));
+  wrap.appendChild(el(`<p class="text-sm text-[var(--ink-2)] mb-6 max-w-xl">Full body length, three angles, no face. This gives a rough visual estimate for coaching purposes only — never a substitute for a clinical measurement like DEXA or BodPod.</p>`));
 
-  const grid = el(`<div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6"></div>`);
-  [['front','Front'],['side','Side'],['rear','Rear'],['target','Target Physique']].forEach(([key,label])=>{
-    const slot = el(`<div class="card p-3 text-center"></div>`);
-    slot.appendChild(el(`<div class="label mb-2">${label}</div>`));
-    if(state.photos[key]){
-      slot.appendChild(el(`<img src="${state.photos[key]}" class="w-full h-32 object-cover rounded mb-2">`));
-    } else {
-      slot.appendChild(el(`<div class="w-full h-32 rounded mb-2 checker flex items-center justify-center text-xs text-[var(--ink-2)]">No photo</div>`));
-    }
-    const inputId = 'photo-'+key;
-    const inp = el(`<input type="file" accept="image/*" id="${inputId}" class="hidden">`);
-    inp.onchange = async (e)=>{
-      const f = e.target.files[0];
-      if(!f) return;
-      state.photos[key] = await resizeImageFile(f);
-      queueSave(); render();
-    };
-    slot.appendChild(inp);
-    const btn = el(`<button class="btn btn-ghost text-xs px-3 py-1.5 rounded w-full">Upload</button>`);
-    btn.onclick = ()=> inp.click();
-    slot.appendChild(btn);
-    grid.appendChild(slot);
+  /* ---- Starting point (baseline) ---- */
+  wrap.appendChild(el(`<h3 class="font-display text-lg font-semibold mb-2">Your Starting Point</h3>`));
+  const baseGrid = el(`<div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3"></div>`);
+  [['front','Front'],['side','Side'],['rear','Rear']].forEach(([key,label])=>{
+    baseGrid.appendChild(renderPhotoUploadSlot({
+      label, idSuffix:'baseline-'+key,
+      currentDataUrl: state.photos.baseline[key],
+      disclaimer: BODY_PHOTO_DISCLAIMER,
+      onUpload: (dataUrl)=>{ state.photos.baseline[key]=dataUrl; queueSave(); render(); }
+    }));
   });
-  wrap.appendChild(grid);
+  wrap.appendChild(baseGrid);
 
-  const analyzeBtn = el(`<button class="btn btn-chalk px-5 py-3 rounded-lg mb-6">Analyze My Photos</button>`);
-  analyzeBtn.onclick = runPhotoAnalysis;
-  if(!state.photos.front && !state.photos.side && !state.photos.rear){
-    analyzeBtn.classList.add('opacity-40','pointer-events-none');
-  }
+  /* ---- Goal (target) ---- */
+  wrap.appendChild(el(`<h3 class="font-display text-lg font-semibold mb-2 mt-6">Your Goal Physique</h3>`));
+  const targetGrid = el(`<div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3"></div>`);
+  [['front','Front'],['side','Side'],['rear','Rear']].forEach(([key,label])=>{
+    targetGrid.appendChild(renderPhotoUploadSlot({
+      label, idSuffix:'target-'+key,
+      currentDataUrl: state.photos.target[key],
+      onUpload: (dataUrl)=>{ state.photos.target[key]=dataUrl; queueSave(); render(); }
+    }));
+  });
+  wrap.appendChild(targetGrid);
+
+  const hasBaseline = state.photos.baseline.front || state.photos.baseline.side || state.photos.baseline.rear;
+  const hasTarget = state.photos.target.front || state.photos.target.side || state.photos.target.rear;
+  const analyzeBtn = el(`<button class="btn btn-chalk px-5 py-3 rounded-lg mb-6 mt-2 ${(!hasBaseline||!hasTarget)?'opacity-40 pointer-events-none':''}">${state.analysis.baseline.status==='done'?'Re-Run Comparison':'Analyze & Compare to Goal'}</button>`);
+  analyzeBtn.onclick = runBaselineAnalysis;
   wrap.appendChild(analyzeBtn);
 
-  if(state.analysis.status==='loading'){
+  if(state.analysis.baseline.status==='loading'){
     wrap.appendChild(el(`<div class="flex items-center gap-2 text-sm text-[var(--ink-2)] mb-6"><div class="w-4 h-4 border-2 border-[var(--chalk)] border-t-transparent rounded-full spin"></div> Analyzing...</div>`));
   }
-  if(state.analysis.status==='error'){
+  if(state.analysis.baseline.status==='error'){
     wrap.appendChild(el(`<div class="text-sm text-[var(--alert)] mb-6">Analysis failed. Please try again.</div>`));
   }
-  if(state.analysis.status==='done' && state.analysis.result){
-    const r = state.analysis.result;
-    const card = el(`<div class="card p-5"></div>`);
-    card.appendChild(el(`<div class="label mb-2">Analysis Result <span class="text-[var(--ink-2)] normal-case">(visual estimate — not a clinical measurement)</span></div>`));
-    card.appendChild(el(`<div class="font-display text-2xl font-bold text-[var(--chalk)] mb-3">${r.bodyFatRange || '—'} est. body fat</div>`));
-    card.appendChild(el(`<p class="text-sm text-[var(--ink-1)] mb-3">${r.goalAlignment || ''}</p>`));
-    if(r.focusAreas){
-      card.appendChild(el(`<div class="label mb-1">Suggested Training Focus</div>`));
-      card.appendChild(el(`<p class="text-sm text-[var(--ink-1)] mb-3">${r.focusAreas}</p>`));
-    }
-    if(r.timeframe){
-      card.appendChild(el(`<div class="label mb-1">Realistic Timeframe</div>`));
-      card.appendChild(el(`<p class="text-sm text-[var(--ink-1)]">${r.timeframe}</p>`));
+  if(state.analysis.baseline.status==='done' && state.analysis.baseline.result){
+    wrap.appendChild(renderBaselineAnalysisCard(state.analysis.baseline.result));
+  }
+
+  /* ---- Progress check-ins ---- */
+  wrap.appendChild(el(`<div class="chalk-rule my-8"></div>`));
+  wrap.appendChild(el(`<h3 class="font-display text-lg font-semibold mb-1">Progress Check-Ins</h3>`));
+  const checkins = state.photos.checkins || [];
+  const lastCheckin = checkins.length ? checkins[checkins.length-1] : null;
+  if(lastCheckin){
+    const daysSince = Math.floor((new Date(todayISO()) - new Date(lastCheckin.date))/86400000);
+    const daysUntilDue = Math.max(0, 28-daysSince);
+    wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-4">${daysUntilDue>0 ? `Next check-in due in ${daysUntilDue} day${daysUntilDue===1?'':'s'}.` : `Your next check-in is due — it's been ${daysSince} days.`}</p>`));
+  } else {
+    wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-4">Upload a check-in every 4 weeks to track visible progress against your starting photos.</p>`));
+  }
+
+  const checkinGrid = el(`<div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3"></div>`);
+  ['front','side','rear'].forEach((key)=>{
+    const label = key.charAt(0).toUpperCase()+key.slice(1);
+    checkinGrid.appendChild(renderPhotoUploadSlot({
+      label, idSuffix:'newcheckin-'+key,
+      currentDataUrl: newCheckinDraft[key],
+      disclaimer: BODY_PHOTO_DISCLAIMER,
+      onUpload: (dataUrl)=>{ newCheckinDraft[key]=dataUrl; render(); }
+    }));
+  });
+  wrap.appendChild(checkinGrid);
+
+  const hasDraft = newCheckinDraft.front || newCheckinDraft.side || newCheckinDraft.rear;
+  const submitCheckinBtn = el(`<button class="btn btn-chalk px-5 py-3 rounded-lg mb-8 ${(!hasDraft || !hasBaseline)?'opacity-40 pointer-events-none':''}">Save Check-In & Analyze</button>`);
+  submitCheckinBtn.onclick = submitCheckin;
+  wrap.appendChild(submitCheckinBtn);
+  if(!hasBaseline){
+    wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] -mt-6 mb-8">Add your starting-point photos above first — check-ins are compared against them.</p>`));
+  }
+
+  /* ---- Check-in history ---- */
+  [...checkins].reverse().forEach(ci=>{
+    const analysisEntry = state.analysis.checkins[ci.id];
+    const card = el(`<div class="card p-4 mb-4"></div>`);
+    card.appendChild(el(`<div class="label mb-2">${ci.date}</div>`));
+    const thumbRow = el(`<div class="grid grid-cols-3 gap-2 mb-3"></div>`);
+    ['front','side','rear'].forEach(key=>{
+      if(ci[key]) thumbRow.appendChild(el(`<img src="${ci[key]}" class="w-full h-24 object-cover rounded">`));
+    });
+    card.appendChild(thumbRow);
+    if(!analysisEntry || analysisEntry.status==='loading'){
+      card.appendChild(el(`<div class="flex items-center gap-2 text-xs text-[var(--ink-2)]"><div class="w-3 h-3 border-2 border-[var(--chalk)] border-t-transparent rounded-full spin"></div> Analyzing...</div>`));
+    } else if(analysisEntry.status==='error'){
+      card.appendChild(el(`<div class="text-xs text-[var(--alert)]">Analysis failed for this check-in.</div>`));
+    } else if(analysisEntry.status==='done' && analysisEntry.result){
+      const r = analysisEntry.result;
+      card.appendChild(el(`<p class="text-sm text-[var(--ink-1)] mb-2">${r.appraisal||''}</p>`));
+      if(r.recommendation){
+        card.appendChild(el(`<div class="text-xs font-mono ${r.changeDetected===false ? 'text-[var(--alert)]':'text-[var(--ok)]'}">${r.recommendation}</div>`));
+      }
     }
     wrap.appendChild(card);
-  }
+  });
 
   return wrap;
 }
 
-async function runPhotoAnalysis(){
-  state.analysis.status='loading'; render();
+function renderBaselineAnalysisCard(r){
+  const card = el(`<div class="card p-5 mb-6"></div>`);
+  card.appendChild(el(`<div class="label mb-3">Comparison Analysis <span class="text-[var(--ink-2)] normal-case">(visual estimate — not a clinical measurement)</span></div>`));
+
+  const cols = el(`<div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4"></div>`);
+  const you = el(`<div></div>`);
+  you.appendChild(el(`<div class="label mb-1" style="color:var(--chalk);">You Now</div>`));
+  you.appendChild(el(`<p class="text-sm text-[var(--ink-1)]">${r.clientAppraisal||''}</p>`));
+  const goal = el(`<div></div>`);
+  goal.appendChild(el(`<div class="label mb-1">Your Goal</div>`));
+  goal.appendChild(el(`<p class="text-sm text-[var(--ink-1)]">${r.targetAppraisal||''}</p>`));
+  cols.appendChild(you); cols.appendChild(goal);
+  card.appendChild(cols);
+
+  if(r.keyDifferences){
+    card.appendChild(el(`<div class="label mb-1">Key Differences</div>`));
+    card.appendChild(el(`<p class="text-sm text-[var(--ink-1)] mb-3">${r.keyDifferences}</p>`));
+  }
+  if(r.nutritionRecommendation){
+    card.appendChild(el(`<div class="label mb-1">Nutrition Implication</div>`));
+    card.appendChild(el(`<p class="text-sm text-[var(--ink-1)] mb-3">${r.nutritionRecommendation}</p>`));
+  }
+  if(r.trainingFocus){
+    card.appendChild(el(`<div class="label mb-1">Training Focus</div>`));
+    card.appendChild(el(`<p class="text-sm text-[var(--ink-1)] mb-3">${r.trainingFocus}</p>`));
+  }
+  if(r.timeframe){
+    card.appendChild(el(`<div class="label mb-1">Realistic Timeframe</div>`));
+    card.appendChild(el(`<p class="text-sm text-[var(--ink-1)]">${r.timeframe}</p>`));
+  }
+  if(session.role==='coach' && session.viewingAsCoach && typeof r.suggestedCalorieAdjustment==='number' && r.suggestedCalorieAdjustment!==0){
+    const applyBtn = el(`<button class="btn btn-ghost px-4 py-2 rounded-lg text-xs mt-3">Apply ${r.suggestedCalorieAdjustment>0?'+':''}${r.suggestedCalorieAdjustment}kcal/day to targets</button>`);
+    applyBtn.onclick = ()=> applyNutritionSuggestion({amount:r.suggestedCalorieAdjustment});
+    card.appendChild(applyBtn);
+  }
+  return card;
+}
+
+let newCheckinDraft = {front:null, side:null, rear:null};
+
+async function runBaselineAnalysis(){
+  state.analysis.baseline.status='loading'; render();
   try{
     const content = [];
     const addImg = (label, dataUrl)=>{
@@ -2349,30 +2570,100 @@ async function runPhotoAnalysis(){
       content.push({type:'text', text:label});
       content.push({type:'image', source:{type:'base64', media_type:'image/jpeg', data: dataUrl.split(',')[1]}});
     };
-    addImg('Front view:', state.photos.front);
-    addImg('Side view:', state.photos.side);
-    addImg('Rear view:', state.photos.rear);
-    addImg('Target physique (aspirational reference):', state.photos.target);
+    addImg('Client — front view:', state.photos.baseline.front);
+    addImg('Client — side view:', state.photos.baseline.side);
+    addImg('Client — rear view:', state.photos.baseline.rear);
+    addImg('Goal physique — front view:', state.photos.target.front);
+    addImg('Goal physique — side view:', state.photos.target.side);
+    addImg('Goal physique — rear view:', state.photos.target.rear);
 
     content.push({type:'text', text:`
-You are a supportive, evidence-based fitness coach. Give a rough, kind, non-judgmental visual assessment for training-planning purposes only — never present it as a precise or clinical measurement.
-The person's stated goal is: "${state.profile.goal}". Gender: ${state.profile.gender}.
+You are a supportive, evidence-based physique coach. The first set of photos is the client themselves; the second set is their stated goal physique (a different person they're using as a visual reference). Give an honest, kind, non-judgmental comparison for training-and-nutrition planning purposes only — never a clinical or diagnostic measurement, and never body-shaming.
+Client's stated goal: "${state.profile.goal}". Gender: ${state.profile.gender}.
 Respond ONLY with strict JSON, no markdown, in this exact shape:
-{"bodyFatRange":"e.g. 18-22%","goalAlignment":"1-2 sentences on whether their stated goal fits what's visually apparent, phrased supportively and evidence-based","focusAreas":"1-2 sentences on which muscle groups/areas the program should emphasize, especially relative to the target photo if provided","timeframe":"1 sentence realistic timeframe estimate assuming consistent training and correct nutrition"}
-Keep total output under 120 words. Do not mention weight loss drugs. Be encouraging, never body-shaming.`});
+{
+ "clientAppraisal":"2-3 sentences on the client's current frame, muscle development, approximate body fat range, and posture",
+ "targetAppraisal":"2-3 sentences on the same dimensions (frame, muscle, approximate body fat range, posture) for the goal physique",
+ "keyDifferences":"2-3 sentences on the main differences between the two, framed constructively",
+ "nutritionRecommendation":"1-2 sentences on how this gap should shape the calorie/macro approach (e.g. more of a lean bulk vs a longer cut, higher protein emphasis, etc)",
+ "suggestedCalorieAdjustment": a small integer like -150, -100, 0, 100, or 150 representing a daily kcal nudge to targets given the gap (use 0 if the current plan already fits well),
+ "trainingFocus":"1-2 sentences on which muscle groups or movement patterns the program should emphasize to close the gap",
+ "timeframe":"1 sentence realistic timeframe estimate assuming consistent training and correct nutrition"
+}
+Keep total output under 180 words. Do not mention weight loss drugs or supplements. Be encouraging and evidence-based throughout.`});
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({model:'claude-sonnet-4-6', max_tokens:1000, messages:[{role:'user', content}]})
+      body: JSON.stringify({model:'claude-sonnet-4-6', max_tokens:1200, messages:[{role:'user', content}]})
     });
     const data = await response.json();
     const textBlock = (data.content||[]).find(b=>b.type==='text');
     let clean = (textBlock ? textBlock.text : '{}').replace(/```json|```/g,'').trim();
     const parsed = JSON.parse(clean);
-    state.analysis = {status:'done', result:parsed};
+    state.analysis.baseline = {status:'done', result:parsed};
   }catch(e){
     console.error(e);
-    state.analysis = {status:'error', result:null};
+    state.analysis.baseline = {status:'error', result:null};
+  }
+  queueSave(); render();
+}
+
+async function submitCheckin(){
+  const id = genCode(8);
+  const checkin = {id, date:todayISO(), front:newCheckinDraft.front, side:newCheckinDraft.side, rear:newCheckinDraft.rear};
+  state.photos.checkins = state.photos.checkins || [];
+  state.photos.checkins.push(checkin);
+  newCheckinDraft = {front:null, side:null, rear:null};
+  queueSave(); render();
+  await runCheckinAnalysis(checkin);
+}
+
+async function runCheckinAnalysis(checkin){
+  state.analysis.checkins[checkin.id] = {status:'loading', result:null};
+  render();
+  try{
+    const content = [];
+    const addImg = (label, dataUrl)=>{
+      if(!dataUrl) return;
+      content.push({type:'text', text:label});
+      content.push({type:'image', source:{type:'base64', media_type:'image/jpeg', data: dataUrl.split(',')[1]}});
+    };
+    addImg('Baseline — front view:', state.photos.baseline.front);
+    addImg('Baseline — side view:', state.photos.baseline.side);
+    addImg('Baseline — rear view:', state.photos.baseline.rear);
+    addImg('New check-in — front view:', checkin.front);
+    addImg('New check-in — side view:', checkin.side);
+    addImg('New check-in — rear view:', checkin.rear);
+
+    content.push({type:'text', text:`
+You are a supportive, evidence-based physique coach. The first set of photos is the client's original baseline; the second set is a new progress check-in of the same client. Client's stated goal: "${state.profile.goal}".
+Give an honest, kind, non-judgmental read on whether visible physical change is apparent between the two sets — never a clinical measurement, never body-shaming.
+Respond ONLY with strict JSON, no markdown, in this exact shape:
+{
+ "changeDetected": true or false — whether meaningful visible change toward the goal is apparent,
+ "appraisal":"2-3 sentences describing what has or hasn't visibly changed (muscle, leanness, posture, etc)",
+ "recommendation":"1 sentence — if changeDetected is true, a short encouraging note; if false, a note that the training and nutrition plan may be worth reviewing since progress isn't yet visible"
+}
+Keep total output under 100 words. Be encouraging and evidence-based.`});
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({model:'claude-sonnet-4-6', max_tokens:800, messages:[{role:'user', content}]})
+    });
+    const data = await response.json();
+    const textBlock = (data.content||[]).find(b=>b.type==='text');
+    let clean = (textBlock ? textBlock.text : '{}').replace(/```json|```/g,'').trim();
+    const parsed = JSON.parse(clean);
+    state.analysis.checkins[checkin.id] = {status:'done', result:parsed};
+    if(parsed.changeDetected===false){
+      addNotification(
+        'Progress check-in: no visible change yet',
+        `Your ${checkin.date} check-in didn't show a clear visible change toward your goal. It may be worth reviewing your nutrition targets and training program together.`
+      );
+    }
+  }catch(e){
+    console.error(e);
+    state.analysis.checkins[checkin.id] = {status:'error', result:null};
   }
   queueSave(); render();
 }
