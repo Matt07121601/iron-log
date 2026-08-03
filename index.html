@@ -1441,13 +1441,17 @@ function renderDashboard(){
     </div>
   `));
 
+  const todayFood = state.logs.food[todayISO()] || [];
+  const todayTotals = todayFood.reduce((a,f)=>({protein:a.protein+f.protein, carbs:a.carbs+f.carbs, fat:a.fat+f.fat}), {protein:0, carbs:0, fat:0});
+
   const macroGrid = el(`<div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6"></div>`);
-  [['Protein',active.protein,currentTheme().chalk],['Carbs',active.carbs,'#5B6B7C'],['Fat',active.fat,'#E85D3F']].forEach(([label,m,color])=>{
+  [['Protein',active.protein,todayTotals.protein],['Carbs',active.carbs,todayTotals.carbs],['Fat',active.fat,todayTotals.fat]].forEach(([label,m,consumed])=>{
     const c = el(`<div class="card p-4"></div>`);
-    c.appendChild(el(`<div class="flex justify-between items-baseline mb-2"><span class="label">${label}</span><span class="font-mono text-sm text-[var(--ink-2)]">${m.pct}%</span></div>`));
-    c.appendChild(el(`<div class="font-display text-2xl font-bold mb-2">${m.g}g</div>`));
+    c.appendChild(el(`<div class="flex justify-between items-baseline mb-2"><span class="label">${label}</span><span class="font-mono text-sm text-[var(--ink-2)]">${Math.round(consumed)}/${m.g}g</span></div>`));
+    c.appendChild(el(`<div class="font-display text-2xl font-bold mb-2">${m.g}g <span class="text-xs text-[var(--ink-2)] font-normal">target</span></div>`));
     const track = el(`<div class="progress-track"></div>`);
-    track.appendChild(el(`<div class="progress-fill" style="width:${m.pct}%; background:${color};"></div>`));
+    const exceeded = consumed > m.g;
+    track.appendChild(el(`<div class="progress-fill" style="width:${Math.min(100, m.g>0 ? consumed/m.g*100 : 0)}%; background:${exceeded ? '#FF2D2D' : 'var(--chalk)'};"></div>`));
     c.appendChild(track);
     macroGrid.appendChild(c);
   });
