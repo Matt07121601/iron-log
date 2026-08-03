@@ -1899,7 +1899,8 @@ function renderTracker(){
     c.appendChild(el(`<div class="label">${l}</div>`));
     c.appendChild(el(`<div class="font-mono text-lg font-bold">${Math.round(v)}<span class="text-xs text-[var(--ink-2)]">/${target}</span></div>`));
     const track = el(`<div class="progress-track mt-1"></div>`);
-    track.appendChild(el(`<div class="progress-fill" style="width:${Math.min(100,v/target*100)}%; background:var(--chalk);"></div>`));
+    const exceeded = v > target;
+    track.appendChild(el(`<div class="progress-fill" style="width:${Math.min(100,v/target*100)}%; background:${exceeded ? '#FF2D2D' : 'var(--chalk)'};"></div>`));
     c.appendChild(track);
     sGrid.appendChild(c);
   });
