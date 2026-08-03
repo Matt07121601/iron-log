@@ -300,6 +300,30 @@ async function loadClientState(id){
     const d = await window.storage.get(clientDataKey(id), true);
     if(d && d.value) Object.assign(state, JSON.parse(d.value));
   }catch(e){ /* new client, no data yet */ }
+  normalizeClientPhotosAndAnalysis();
+}
+// Migrates any client saved before the baseline/target/check-in photo redesign
+// (old shape: photos:{front,side,rear,target}, analysis:{status,result}) into the
+// current nested shape, so existing clients' data loads instead of crashing the app.
+function normalizeClientPhotosAndAnalysis(){
+  const p = state.photos;
+  if(!p || !p.baseline){
+    const old = p || {};
+    state.photos = {
+      baseline: {front: old.front||null, side: old.side||null, rear: old.rear||null},
+      target: {front: old.target||null, side: null, rear: null},
+      checkins: Array.isArray(old.checkins) ? old.checkins : []
+    };
+  }
+  const a = state.analysis;
+  if(!a || !a.baseline){
+    const old = a || {};
+    state.analysis = {
+      baseline: {status: old.status || 'idle', result: old.result || null},
+      checkins: (old.checkins && typeof old.checkins==='object') ? old.checkins : {}
+    };
+  }
+  if(!Array.isArray(state.notifications)) state.notifications = [];
 }
 
 /* ---- App bootstrap: only checks a safe public marker + attempts legacy migration, then shows gate ---- */
