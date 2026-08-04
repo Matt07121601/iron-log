@@ -303,6 +303,22 @@ async function loadClientState(id){
     if(d && d.value) Object.assign(state, JSON.parse(d.value));
   }catch(e){ /* new client, no data yet */ }
   normalizeClientPhotosAndAnalysis();
+  normalizeProgramRestTimes();
+  queueSave();
+}
+// Existing clients already have a saved program with rest times generated under
+// the old uniform-per-day scheme. Recompute every exercise's rest time using the
+// current compound/isolation rule, so existing clients get the update too, not
+// just newly onboarded ones.
+function normalizeProgramRestTimes(){
+  if(!Array.isArray(state.program)) return;
+  const bodyMods = applyBodyTypeModifiers(state.profile.bodyType);
+  state.program.forEach(day=>{
+    (day.exercises||[]).forEach(ex=>{
+      if(ex.muscle === 'Conditioning') return; // leave the cardio finisher alone
+      ex.restSec = restSecForExercise(ex.name, state.profile.goal, bodyMods);
+    });
+  });
 }
 // Migrates any client saved before the baseline/target/check-in photo redesign
 // (old shape: photos:{front,side,rear,target}, analysis:{status,result}) into the
@@ -552,6 +568,36 @@ const EX = {
 function videoLink(name){
   return `https://www.youtube.com/results?search_query=${encodeURIComponent(name+' proper form tutorial')}`;
 }
+// Compound lifts (multi-joint, multiple muscle groups) get longer rest for full
+// recovery between heavy efforts; isolation moves (single-joint, one muscle group)
+// get shorter rest since they're less taxing on the CNS. Anything not listed here
+// defaults to isolation-length rest as the safer/shorter option.
+const COMPOUND_EXERCISE_NAMES = new Set([
+  'Barbell Bench Press','Overhead Press','Incline Dumbbell Press','Dips','Machine Chest Press','Arnold Press',
+  'Deadlift','Pull-Up','Barbell Row','Seated Cable Row','T-Bar Row','Chest-Supported Row',
+  'Back Squat','Romanian Deadlift','Leg Press','Walking Lunge','Front Squat','Hip Thrust',
+  'Dumbbell Bench Press','Dumbbell Shoulder Press','Incline Push-Up','Bench Dip','Dumbbell Floor Press','Dumbbell Arnold Press','Close-Grip Push-Up',
+  'Single-Arm Dumbbell Row','Resistance Band Pulldown','Dumbbell Deadlift','Renegade Row',
+  'Dumbbell Goblet Squat','Dumbbell Romanian Deadlift','Bulgarian Split Squat','Dumbbell Walking Lunge','Glute Bridge','Dumbbell Step-Up','Single-Leg Hip Thrust','Dumbbell Sumo Squat',
+  'Push-Up','Pike Push-Up','Diamond Push-Up','Decline Push-Up','Archer Push-Up','Wall Handstand Push-Up','Chair Tricep Dip',
+  'Inverted Row','Doorframe Row','Chin-Up','Towel Row',
+  'Bodyweight Squat','Single-Leg Glute Bridge','Jump Squat','Step-Up','Single-Leg RDL'
+]);
+function isCompoundExercise(name){
+  return COMPOUND_EXERCISE_NAMES.has(name);
+}
+// Base rest by training goal, scaled within the required bounds:
+// compound lifts 120-180s (2-3 min), isolation lifts 90-150s (1:30-2:30).
+const COMPOUND_REST_BY_GOAL = {fatloss:120, muscle:150, strength:180, recomp:135, endurance:120};
+const ISOLATION_REST_BY_GOAL = {fatloss:90, muscle:120, strength:150, recomp:105, endurance:90};
+function restSecForExercise(name, goal, bodyMods){
+  const compound = isCompoundExercise(name);
+  const base = compound ? (COMPOUND_REST_BY_GOAL[goal]||150) : (ISOLATION_REST_BY_GOAL[goal]||120);
+  const withMods = base + ((bodyMods && bodyMods.restAddSec) || 0);
+  const lo = compound ? 120 : 90;
+  const hi = compound ? 180 : 150;
+  return Math.max(lo, Math.min(hi, withMods));
+}
 function goalScheme(goal){
   const schemes = {
     fatloss:{sets:3, reps:'10-15', rir:'1-2', restSec:60, label:'Fat Loss'},
@@ -571,7 +617,6 @@ function buildProgram(p){
     sets: Math.max(2, Math.min(6, Math.round(baseScheme.sets * bodyMods.volumeMult))),
     reps: baseScheme.reps,
     rir: baseScheme.rir,
-    restSec: Math.max(20, baseScheme.restSec + bodyMods.restAddSec),
     label: baseScheme.label
   };
   const exCount = Math.max(4, Math.min(8, Math.floor((parseInt(p.sessionMins)||60)/9)));
@@ -603,7 +648,7 @@ function buildProgram(p){
     const rotated = pool.slice(offset).concat(pool.slice(0, offset));
     const chosen = rotated.slice(0, exCount);
     const exercises = chosen.map(e=>({
-      name:e.n, muscle:e.m, sets:scheme.sets, repRange:scheme.reps, rir:scheme.rir, restSec:scheme.restSec
+      name:e.n, muscle:e.m, sets:scheme.sets, repRange:scheme.reps, rir:scheme.rir, restSec:restSecForExercise(e.n, p.goal, bodyMods)
     }));
     // Endomorph modifier: add a conditioning finisher, since higher NEAT/cardio inclusion
     // is a reasonable, low-risk addition regardless of resistance-training goal.
@@ -1715,22 +1760,19 @@ function renderExerciseCard(day, ex, sessionLog){
   }
 
   const table = el(`<div class="space-y-2"></div>`);
-  const headerRow = el(`<div class="grid grid-cols-12 gap-1.5 text-xs label px-1"><div class="col-span-1">Set</div><div class="col-span-3">Wt (${unit})</div><div class="col-span-2">Reps</div><div class="col-span-2">RPE</div><div class="col-span-2">Rest</div><div class="col-span-2">Done</div></div>`);
+  const headerRow = el(`<div class="grid grid-cols-12 gap-1.5 text-xs label px-1"><div class="col-span-1">Set</div><div class="col-span-4">Wt (${unit})</div><div class="col-span-3">Reps</div><div class="col-span-2">RPE</div><div class="col-span-2">Done</div></div>`);
   table.appendChild(headerRow);
 
   sets.forEach((s, idx)=>{
     const row = el(`<div class="set-row grid grid-cols-12 gap-1.5 items-center border border-[var(--line)] rounded-lg px-1 py-1 ${s.done?'done':''}"></div>`);
     row.appendChild(el(`<div class="col-span-1 text-center font-mono text-sm">${idx+1}</div>`));
-    const wIn = el(`<input type="number" value="${toDisplayWeight(s.weight, unit)}" class="col-span-3 !py-1.5 text-sm">`);
+    const wIn = el(`<input type="number" value="${toDisplayWeight(s.weight, unit)}" class="col-span-4 !py-1.5 text-sm">`);
     wIn.oninput = (e)=>{ s.weight=toStorageWeightKg(e.target.value, unit); queueSave(); };
-    const rIn = el(`<input type="number" value="${s.reps}" class="col-span-2 !py-1.5 text-sm">`);
+    const rIn = el(`<input type="number" value="${s.reps}" class="col-span-3 !py-1.5 text-sm">`);
     rIn.oninput = (e)=>{ s.reps=e.target.value; queueSave(); };
     const pIn = el(`<input type="number" step="0.5" min="1" max="10" value="${s.rpe}" class="col-span-2 !py-1.5 text-sm">`);
     pIn.oninput = (e)=>{ s.rpe=e.target.value; queueSave(); };
     row.appendChild(wIn); row.appendChild(rIn); row.appendChild(pIn);
-    const restBtn = el(`<button class="col-span-2 font-mono text-xs py-1.5 rounded btn-ghost" title="Start rest timer for this set">⏱</button>`);
-    restBtn.onclick = ()=> Timer.start(ex.restSec);
-    row.appendChild(restBtn);
     const doneBtn = el(`<button class="col-span-2 font-mono text-xs py-1.5 rounded ${s.done?'bg-[var(--ok)] text-[#111]':'btn-ghost'}">${s.done?'✓':'Log'}</button>`);
     doneBtn.onclick = ()=>{
       s.done = !s.done;
