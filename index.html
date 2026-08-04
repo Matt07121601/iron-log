@@ -1765,13 +1765,13 @@ function renderTrainingCalendar(){
   const monthEnd = endOfMonth(viewDate);
   const monthLabel = new Date(monthStart+'T00:00:00').toLocaleDateString('en-GB', {month:'long', year:'numeric'});
 
-  const nav = el(`<div class="flex items-center justify-between mb-3"></div>`);
-  const prevBtn = el(`<button class="btn btn-ghost text-lg px-4 py-2.5 rounded-lg leading-none" style="min-width:44px;">←</button>`);
+  const nav = el(`<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;"></div>`);
+  const prevBtn = el(`<button class="btn btn-ghost" style="min-width:44px; min-height:44px; font-size:20px; line-height:1; padding:10px 16px; border-radius:8px;">←</button>`);
   prevBtn.onclick = ()=>{ calendarViewDate = addMonthsISO(monthStart,-1); render(); };
-  const todayBtn = el(`<button class="font-display font-semibold text-sm px-2">${monthLabel}</button>`);
+  const todayBtn = el(`<button class="font-display" style="font-weight:600; font-size:14px; padding:0 8px;">${monthLabel}</button>`);
   todayBtn.title = 'Jump to current month';
   todayBtn.onclick = ()=>{ calendarViewDate = null; render(); };
-  const nextBtn = el(`<button class="btn btn-ghost text-lg px-4 py-2.5 rounded-lg leading-none" style="min-width:44px;">→</button>`);
+  const nextBtn = el(`<button class="btn btn-ghost" style="min-width:44px; min-height:44px; font-size:20px; line-height:1; padding:10px 16px; border-radius:8px;">→</button>`);
   nextBtn.onclick = ()=>{ calendarViewDate = addMonthsISO(monthStart,1); render(); };
   nav.appendChild(prevBtn); nav.appendChild(todayBtn); nav.appendChild(nextBtn);
   wrap.appendChild(nav);
@@ -1783,27 +1783,26 @@ function renderTrainingCalendar(){
   const byDate = {};
   schedule.forEach(e=>{ byDate[e.date] = e; });
 
-  const grid = el(`<div class="grid grid-cols-7 gap-1"></div>`);
-  ['M','T','W','T','F','S','S'].forEach(d=> grid.appendChild(el(`<div class="text-center text-sm font-display font-bold text-[var(--ink-1)] pb-1">${d}</div>`)));
+  const grid = el(`<div style="display:grid; grid-template-columns:repeat(7, 1fr); gap:4px;"></div>`);
+  ['M','T','W','T','F','S','S'].forEach(d=> grid.appendChild(el(`<div class="font-display" style="text-align:center; font-size:14px; font-weight:700; color:var(--ink-1); padding-bottom:4px;">${d}</div>`)));
 
   const firstDow = new Date(monthStart+'T00:00:00').getDay(); // 0=Sun..6=Sat
   const leadingBlanks = (firstDow===0) ? 6 : firstDow-1; // convert to Mon-first offset
   for(let i=0;i<leadingBlanks;i++){ grid.appendChild(el(`<div></div>`)); }
 
   const today = todayISO();
+  const daysInMonth = parseInt(monthEnd.slice(8,10));
   let cursor = monthStart;
-  let gridSafety = 0;
-  while(cursor <= monthEnd && gridSafety < 60){
-    gridSafety++;
+  for(let dayNum=1; dayNum<=daysInMonth; dayNum++){
     const entry = byDate[cursor];
-    const dayNum = parseInt(cursor.slice(8,10));
     const isToday = cursor===today;
-    const cell = el(`<div class="rounded-lg p-1 text-center flex flex-col items-center justify-start" style="min-height:56px; background:var(--bg-2); ${isToday?'border:2px solid var(--chalk-light);':''}"></div>`);
-    cell.appendChild(el(`<div class="text-sm font-mono font-semibold ${isToday?'text-[var(--chalk-light)]':'text-[var(--ink-1)]'}">${dayNum}</div>`));
+    const cellStyle = `border-radius:10px; padding:4px; text-align:center; display:flex; flex-direction:column; align-items:center; justify-content:flex-start; min-height:56px; background:var(--bg-2); ${isToday?'border:2px solid var(--chalk-light);':'border:2px solid transparent;'}`;
+    const cell = el(`<div style="${cellStyle}"></div>`);
+    cell.appendChild(el(`<div class="font-mono" style="font-size:14px; font-weight:600; color:${isToday?'var(--chalk-light)':'var(--ink-1)'};">${dayNum}</div>`));
     if(entry){
       const color = CAL_STATUS_COLOR[entry.status];
       cell.appendChild(el(`<div style="width:7px; height:7px; border-radius:50%; background:${color}; margin:3px 0; box-shadow:0 0 5px ${color};"></div>`));
-      cell.appendChild(el(`<div class="text-[10px] font-semibold leading-tight" style="color:${color};">${entry.dayName}</div>`));
+      cell.appendChild(el(`<div class="font-mono" style="font-size:10px; font-weight:600; line-height:1.1; color:${color};">${entry.dayName}</div>`));
       if(entry.status==='today'){
         cell.style.cursor = 'pointer';
         cell.onclick = ()=>{
@@ -1817,9 +1816,9 @@ function renderTrainingCalendar(){
   }
   wrap.appendChild(grid);
 
-  const legend = el(`<div class="flex flex-wrap gap-3 mt-3"></div>`);
+  const legend = el(`<div style="display:flex; flex-wrap:wrap; gap:12px; margin-top:12px;"></div>`);
   Object.keys(CAL_STATUS_LABEL).forEach(key=>{
-    const item = el(`<div class="flex items-center gap-1.5 text-xs font-mono font-medium text-[var(--ink-1)]"></div>`);
+    const item = el(`<div class="font-mono" style="display:flex; align-items:center; gap:6px; font-size:12px; font-weight:500; color:var(--ink-1);"></div>`);
     item.appendChild(el(`<span style="width:9px; height:9px; border-radius:50%; background:${CAL_STATUS_COLOR[key]}; display:inline-block; box-shadow:0 0 5px ${CAL_STATUS_COLOR[key]};"></span>`));
     item.appendChild(el(`<span>${CAL_STATUS_LABEL[key]}</span>`));
     legend.appendChild(item);
