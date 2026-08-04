@@ -414,6 +414,20 @@ function formatCalendarDate(dateStr){
   const d = new Date(dateStr+'T00:00:00');
   return d.toLocaleDateString('en-GB', {weekday:'short', month:'short', day:'numeric'});
 }
+function startOfMonth(dateStr){
+  const d = new Date(dateStr+'T00:00:00');
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`;
+}
+function endOfMonth(dateStr){
+  const d = new Date(dateStr+'T00:00:00');
+  const end = new Date(d.getFullYear(), d.getMonth()+1, 0);
+  return end.toISOString().slice(0,10);
+}
+function addMonthsISO(dateStr, months){
+  const d = new Date(dateStr+'T00:00:00');
+  d.setMonth(d.getMonth()+months);
+  return d.toISOString().slice(0,10);
+}
 function el(html){ const t=document.createElement('template'); t.innerHTML=html.trim(); return t.content.firstChild; }
 
 /* ============================= GENDER ACCENT THEME ============================= */
@@ -877,7 +891,7 @@ async function submitCode(code){
 function logoutSession(){
   session = {role:null, clientId:null, clientName:null, viewingAsCoach:false};
   gateSubmitError = null; gateSetupError = null; gateError = null;
-  workoutEditMode = false; notificationsOpen = false; showCalendar = false; newCheckinDraft = {front:null, side:null, rear:null};
+  workoutEditMode = false; notificationsOpen = false; showCalendar = false; calendarViewDate = null; newCheckinDraft = {front:null, side:null, rear:null};
   clearInterval(Timer.interval);
   $('timerBar') && $('timerBar').classList.add('hidden');
   chartInstances.forEach(c=>{ try{ c.destroy(); }catch(e){} });
@@ -889,7 +903,7 @@ function coachOpenClient(clientId, name){
   session.clientId = clientId;
   session.clientName = name;
   session.viewingAsCoach = true;
-  checkinStatus = 'idle'; checkinDraft = null; workoutEditMode = false; notificationsOpen = false; showCalendar = false; newCheckinDraft = {front:null, side:null, rear:null};
+  checkinStatus = 'idle'; checkinDraft = null; workoutEditMode = false; notificationsOpen = false; showCalendar = false; calendarViewDate = null; newCheckinDraft = {front:null, side:null, rear:null};
   gateBusy = true; render();
   loadClientState(clientId).then(()=>{ gateBusy=false; render(); });
 }
@@ -897,7 +911,7 @@ function coachBackToDashboard(){
   session.clientId = null;
   session.clientName = null;
   session.viewingAsCoach = false;
-  checkinStatus = 'idle'; checkinDraft = null; workoutEditMode = false; notificationsOpen = false; showCalendar = false; newCheckinDraft = {front:null, side:null, rear:null};
+  checkinStatus = 'idle'; checkinDraft = null; workoutEditMode = false; notificationsOpen = false; showCalendar = false; calendarViewDate = null; newCheckinDraft = {front:null, side:null, rear:null};
   clearInterval(Timer.interval);
   $('timerBar') && $('timerBar').classList.add('hidden');
   chartInstances.forEach(c=>{ try{ c.destroy(); }catch(e){} });
@@ -1692,13 +1706,13 @@ function wasSessionCompleted(dayName, dateStr){
 // skipped — which naturally shifts every later session back too. This is fully
 // recomputed from the log history each time, so it self-corrects daily with no
 // separate schedule state to keep in sync.
-function computeAdaptiveSchedule(daysAhead=10){
+function computeAdaptiveSchedule(horizonDate){
   const program = state.program;
   if(!program || program.length===0) return [];
   const weekdaySlots = getTrainingWeekdays(state.profile.daysPerWeek);
   const startDate = state.profile.programStartDate || todayISO();
   const today = todayISO();
-  const horizon = addDaysISO(today, daysAhead);
+  const horizon = horizonDate || addDaysISO(today, 10);
 
   let cursor = nextTrainingDateOnOrAfter(startDate, weekdaySlots);
   let pointer = 0;
@@ -1728,56 +1742,83 @@ function computeAdaptiveSchedule(daysAhead=10){
 }
 
 let showCalendar = false;
+let calendarViewDate = null; // any date within the currently viewed month; null = current month
+const CAL_STATUS_COLOR = {completed:'var(--ok)', missed:'var(--alert)', today:'var(--chalk)', upcoming:'var(--ink-2)'};
+const CAL_STATUS_LABEL = {completed:'Completed', missed:'Missed', today:'Today', upcoming:'Upcoming'};
+
 function renderTrainingCalendar(){
   const wrap = el(`<div class="card p-4 mb-4"></div>`);
   const head = el(`<div class="flex items-center justify-between mb-3"></div>`);
   head.appendChild(el(`<div class="label">Training Calendar</div>`));
   const closeBtn = el(`<button class="text-xs text-[var(--ink-2)] hover:text-[var(--chalk)]">Close</button>`);
-  closeBtn.onclick = ()=>{ showCalendar=false; render(); };
+  closeBtn.onclick = ()=>{ showCalendar=false; calendarViewDate=null; render(); };
   head.appendChild(closeBtn);
   wrap.appendChild(head);
 
-  const schedule = computeAdaptiveSchedule(10);
-  const cutoff = addDaysISO(todayISO(), -14);
-  let visible = schedule.filter(e=> e.date >= cutoff);
-  // A still-pending missed session shows up once per due date until it's
-  // rescheduled — collapse consecutive repeats down to just the first miss,
-  // so the list reads as "missed, then rescheduled to..." rather than spamming
-  // the same session across every date it was overdue.
-  visible = visible.filter((e,i)=>{
-    if(e.status!=='missed') return true;
-    const prev = visible[i-1];
-    return !(prev && prev.status==='missed' && prev.dayName===e.dayName);
-  });
-  if(visible.length===0){
-    wrap.appendChild(el(`<div class="text-sm text-[var(--ink-2)]">No scheduled sessions yet.</div>`));
-    return wrap;
-  }
-  const statusStyles = {
-    completed: {icon:'✓', color:'var(--ok)', label:'Completed'},
-    missed: {icon:'✕', color:'var(--alert)', label:'Missed'},
-    today: {icon:'●', color:'var(--chalk)', label:'Today'},
-    upcoming: {icon:'○', color:'var(--ink-2)', label:'Upcoming'}
-  };
-  const list = el(`<div class="space-y-1"></div>`);
-  visible.forEach(entry=>{
-    const st = statusStyles[entry.status];
-    const row = el(`<div class="flex items-center justify-between py-2 px-2 rounded-lg ${entry.status==='today'?'bg-[var(--bg-2)]':''}"></div>`);
-    const left = el(`<div class="flex items-center gap-3"></div>`);
-    left.appendChild(el(`<span style="color:${st.color}; font-size:14px; width:16px; display:inline-block;">${st.icon}</span>`));
-    left.appendChild(el(`<div><div class="text-sm font-medium">${entry.dayName}</div><div class="text-xs font-mono text-[var(--ink-2)]">${formatCalendarDate(entry.date)}</div></div>`));
-    row.appendChild(left);
-    row.appendChild(el(`<span class="text-xs font-mono" style="color:${st.color};">${st.label}</span>`));
-    if(entry.status==='today'){
-      row.style.cursor = 'pointer';
-      row.onclick = ()=>{
-        const idx = state.program.findIndex(d=>d.name===entry.dayName);
-        if(idx>=0){ state.activeDayIndex=idx; showCalendar=false; render(); }
-      };
+  const viewDate = calendarViewDate || todayISO();
+  const monthStart = startOfMonth(viewDate);
+  const monthEnd = endOfMonth(viewDate);
+  const monthLabel = new Date(monthStart+'T00:00:00').toLocaleDateString('en-GB', {month:'long', year:'numeric'});
+
+  const nav = el(`<div class="flex items-center justify-between mb-3"></div>`);
+  const prevBtn = el(`<button class="btn btn-ghost text-xs px-3 py-1.5 rounded">←</button>`);
+  prevBtn.onclick = ()=>{ calendarViewDate = addMonthsISO(monthStart,-1); render(); };
+  const todayBtn = el(`<button class="font-display font-semibold text-sm">${monthLabel}</button>`);
+  todayBtn.title = 'Jump to current month';
+  todayBtn.onclick = ()=>{ calendarViewDate = null; render(); };
+  const nextBtn = el(`<button class="btn btn-ghost text-xs px-3 py-1.5 rounded">→</button>`);
+  nextBtn.onclick = ()=>{ calendarViewDate = addMonthsISO(monthStart,1); render(); };
+  nav.appendChild(prevBtn); nav.appendChild(todayBtn); nav.appendChild(nextBtn);
+  wrap.appendChild(nav);
+
+  // Compute the adaptive schedule out to the end of the viewed month (plus a
+  // small buffer) so navigating forward/back always has data to show, even for
+  // months with no logged history yet.
+  const schedule = computeAdaptiveSchedule(addDaysISO(monthEnd, 3));
+  const byDate = {};
+  schedule.forEach(e=>{ byDate[e.date] = e; });
+
+  const grid = el(`<div class="grid grid-cols-7 gap-1"></div>`);
+  ['M','T','W','T','F','S','S'].forEach(d=> grid.appendChild(el(`<div class="text-center text-[10px] font-mono text-[var(--ink-2)] pb-1">${d}</div>`)));
+
+  const firstDow = new Date(monthStart+'T00:00:00').getDay(); // 0=Sun..6=Sat
+  const leadingBlanks = (firstDow===0) ? 6 : firstDow-1; // convert to Mon-first offset
+  for(let i=0;i<leadingBlanks;i++){ grid.appendChild(el(`<div></div>`)); }
+
+  const today = todayISO();
+  let cursor = monthStart;
+  while(cursor <= monthEnd){
+    const entry = byDate[cursor];
+    const dayNum = parseInt(cursor.slice(8,10));
+    const isToday = cursor===today;
+    const cell = el(`<div class="rounded-lg p-1 text-center flex flex-col items-center justify-start" style="min-height:50px; background:var(--bg-2); ${isToday?'border:1px solid var(--chalk);':''}"></div>`);
+    cell.appendChild(el(`<div class="text-[10px] font-mono ${isToday?'text-[var(--chalk)]':'text-[var(--ink-2)]'}">${dayNum}</div>`));
+    if(entry){
+      const color = CAL_STATUS_COLOR[entry.status];
+      cell.appendChild(el(`<div style="width:5px; height:5px; border-radius:50%; background:${color}; margin:2px 0;"></div>`));
+      cell.appendChild(el(`<div class="text-[8px] leading-tight" style="color:${color};">${entry.dayName}</div>`));
+      if(entry.status==='today'){
+        cell.style.cursor = 'pointer';
+        cell.onclick = ()=>{
+          const idx = state.program.findIndex(d=>d.name===entry.dayName);
+          if(idx>=0){ state.activeDayIndex=idx; showCalendar=false; calendarViewDate=null; render(); }
+        };
+      }
     }
-    list.appendChild(row);
+    grid.appendChild(cell);
+    cursor = addDaysISO(cursor,1);
+  }
+  wrap.appendChild(grid);
+
+  const legend = el(`<div class="flex flex-wrap gap-3 mt-3"></div>`);
+  Object.keys(CAL_STATUS_LABEL).forEach(key=>{
+    const item = el(`<div class="flex items-center gap-1.5 text-[10px] font-mono text-[var(--ink-2)]"></div>`);
+    item.appendChild(el(`<span style="width:7px; height:7px; border-radius:50%; background:${CAL_STATUS_COLOR[key]}; display:inline-block;"></span>`));
+    item.appendChild(el(`<span>${CAL_STATUS_LABEL[key]}</span>`));
+    legend.appendChild(item);
   });
-  wrap.appendChild(list);
+  wrap.appendChild(legend);
+
   wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mt-3">Missed sessions automatically push the rest of the schedule back — nothing is skipped, just shifted.</p>`));
   return wrap;
 }
