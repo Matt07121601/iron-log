@@ -1792,7 +1792,9 @@ function renderTrainingCalendar(){
 
   const today = todayISO();
   let cursor = monthStart;
-  while(cursor <= monthEnd){
+  let gridSafety = 0;
+  while(cursor <= monthEnd && gridSafety < 60){
+    gridSafety++;
     const entry = byDate[cursor];
     const dayNum = parseInt(cursor.slice(8,10));
     const isToday = cursor===today;
