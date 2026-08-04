@@ -1748,7 +1748,7 @@ function computeAdaptiveSchedule(horizonDate){
 
 let showCalendar = false;
 let calendarViewDate = null; // any date within the currently viewed month; null = current month
-const CAL_STATUS_COLOR = {completed:'var(--ok)', missed:'var(--alert)', today:'var(--chalk)', upcoming:'var(--ink-2)'};
+const CAL_STATUS_COLOR = {completed:'#2EE6A6', missed:'#FF3B3B', today:'var(--chalk-light)', upcoming:'#B8B7B0'};
 const CAL_STATUS_LABEL = {completed:'Completed', missed:'Missed', today:'Today', upcoming:'Upcoming'};
 
 function renderTrainingCalendar(){
@@ -1766,12 +1766,12 @@ function renderTrainingCalendar(){
   const monthLabel = new Date(monthStart+'T00:00:00').toLocaleDateString('en-GB', {month:'long', year:'numeric'});
 
   const nav = el(`<div class="flex items-center justify-between mb-3"></div>`);
-  const prevBtn = el(`<button class="btn btn-ghost text-xs px-3 py-1.5 rounded">←</button>`);
+  const prevBtn = el(`<button class="btn btn-ghost text-lg px-4 py-2.5 rounded-lg leading-none" style="min-width:44px;">←</button>`);
   prevBtn.onclick = ()=>{ calendarViewDate = addMonthsISO(monthStart,-1); render(); };
-  const todayBtn = el(`<button class="font-display font-semibold text-sm">${monthLabel}</button>`);
+  const todayBtn = el(`<button class="font-display font-semibold text-sm px-2">${monthLabel}</button>`);
   todayBtn.title = 'Jump to current month';
   todayBtn.onclick = ()=>{ calendarViewDate = null; render(); };
-  const nextBtn = el(`<button class="btn btn-ghost text-xs px-3 py-1.5 rounded">→</button>`);
+  const nextBtn = el(`<button class="btn btn-ghost text-lg px-4 py-2.5 rounded-lg leading-none" style="min-width:44px;">→</button>`);
   nextBtn.onclick = ()=>{ calendarViewDate = addMonthsISO(monthStart,1); render(); };
   nav.appendChild(prevBtn); nav.appendChild(todayBtn); nav.appendChild(nextBtn);
   wrap.appendChild(nav);
@@ -1784,7 +1784,7 @@ function renderTrainingCalendar(){
   schedule.forEach(e=>{ byDate[e.date] = e; });
 
   const grid = el(`<div class="grid grid-cols-7 gap-1"></div>`);
-  ['M','T','W','T','F','S','S'].forEach(d=> grid.appendChild(el(`<div class="text-center text-[10px] font-mono text-[var(--ink-2)] pb-1">${d}</div>`)));
+  ['M','T','W','T','F','S','S'].forEach(d=> grid.appendChild(el(`<div class="text-center text-sm font-display font-bold text-[var(--ink-1)] pb-1">${d}</div>`)));
 
   const firstDow = new Date(monthStart+'T00:00:00').getDay(); // 0=Sun..6=Sat
   const leadingBlanks = (firstDow===0) ? 6 : firstDow-1; // convert to Mon-first offset
@@ -1798,12 +1798,12 @@ function renderTrainingCalendar(){
     const entry = byDate[cursor];
     const dayNum = parseInt(cursor.slice(8,10));
     const isToday = cursor===today;
-    const cell = el(`<div class="rounded-lg p-1 text-center flex flex-col items-center justify-start" style="min-height:50px; background:var(--bg-2); ${isToday?'border:1px solid var(--chalk);':''}"></div>`);
-    cell.appendChild(el(`<div class="text-[10px] font-mono ${isToday?'text-[var(--chalk)]':'text-[var(--ink-2)]'}">${dayNum}</div>`));
+    const cell = el(`<div class="rounded-lg p-1 text-center flex flex-col items-center justify-start" style="min-height:56px; background:var(--bg-2); ${isToday?'border:2px solid var(--chalk-light);':''}"></div>`);
+    cell.appendChild(el(`<div class="text-sm font-mono font-semibold ${isToday?'text-[var(--chalk-light)]':'text-[var(--ink-1)]'}">${dayNum}</div>`));
     if(entry){
       const color = CAL_STATUS_COLOR[entry.status];
-      cell.appendChild(el(`<div style="width:5px; height:5px; border-radius:50%; background:${color}; margin:2px 0;"></div>`));
-      cell.appendChild(el(`<div class="text-[8px] leading-tight" style="color:${color};">${entry.dayName}</div>`));
+      cell.appendChild(el(`<div style="width:7px; height:7px; border-radius:50%; background:${color}; margin:3px 0; box-shadow:0 0 5px ${color};"></div>`));
+      cell.appendChild(el(`<div class="text-[10px] font-semibold leading-tight" style="color:${color};">${entry.dayName}</div>`));
       if(entry.status==='today'){
         cell.style.cursor = 'pointer';
         cell.onclick = ()=>{
@@ -1819,8 +1819,8 @@ function renderTrainingCalendar(){
 
   const legend = el(`<div class="flex flex-wrap gap-3 mt-3"></div>`);
   Object.keys(CAL_STATUS_LABEL).forEach(key=>{
-    const item = el(`<div class="flex items-center gap-1.5 text-[10px] font-mono text-[var(--ink-2)]"></div>`);
-    item.appendChild(el(`<span style="width:7px; height:7px; border-radius:50%; background:${CAL_STATUS_COLOR[key]}; display:inline-block;"></span>`));
+    const item = el(`<div class="flex items-center gap-1.5 text-xs font-mono font-medium text-[var(--ink-1)]"></div>`);
+    item.appendChild(el(`<span style="width:9px; height:9px; border-radius:50%; background:${CAL_STATUS_COLOR[key]}; display:inline-block; box-shadow:0 0 5px ${CAL_STATUS_COLOR[key]};"></span>`));
     item.appendChild(el(`<span>${CAL_STATUS_LABEL[key]}</span>`));
     legend.appendChild(item);
   });
