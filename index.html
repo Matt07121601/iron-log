@@ -406,7 +406,8 @@ const $ = (id)=>document.getElementById(id);
 const todayISO = ()=> new Date().toISOString().slice(0,10);
 const fmt1 = (n)=> Math.round(n*10)/10;
 function addDaysISO(dateStr, days){
-  const d = new Date(dateStr+'T00:00:00');
+  const d = new Date((dateStr||todayISO())+'T00:00:00');
+  if(isNaN(d.getTime())) return todayISO();
   d.setDate(d.getDate()+days);
   return d.toISOString().slice(0,10);
 }
@@ -415,16 +416,19 @@ function formatCalendarDate(dateStr){
   return d.toLocaleDateString('en-GB', {weekday:'short', month:'short', day:'numeric'});
 }
 function startOfMonth(dateStr){
-  const d = new Date(dateStr+'T00:00:00');
+  const d = new Date((dateStr||todayISO())+'T00:00:00');
+  if(isNaN(d.getTime())) return startOfMonth(todayISO());
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`;
 }
 function endOfMonth(dateStr){
-  const d = new Date(dateStr+'T00:00:00');
+  const d = new Date((dateStr||todayISO())+'T00:00:00');
+  if(isNaN(d.getTime())) return endOfMonth(todayISO());
   const end = new Date(d.getFullYear(), d.getMonth()+1, 0);
   return end.toISOString().slice(0,10);
 }
 function addMonthsISO(dateStr, months){
-  const d = new Date(dateStr+'T00:00:00');
+  const d = new Date((dateStr||todayISO())+'T00:00:00');
+  if(isNaN(d.getTime())) return addMonthsISO(todayISO(), months);
   d.setMonth(d.getMonth()+months);
   return d.toISOString().slice(0,10);
 }
@@ -1686,7 +1690,8 @@ function getTrainingWeekdays(daysPerWeek){
   return slots;
 }
 function nextTrainingDateOnOrAfter(dateStr, weekdaySlots){
-  let d = dateStr;
+  let d = dateStr || todayISO();
+  if(!Array.isArray(weekdaySlots) || weekdaySlots.length===0) weekdaySlots = [1];
   for(let i=0;i<8;i++){
     const dow = new Date(d+'T00:00:00').getDay();
     if(weekdaySlots.includes(dow)) return d;
@@ -1853,7 +1858,17 @@ function renderWorkoutView(){
   wrap.appendChild(controlsRow);
 
   if(showCalendar){
-    wrap.appendChild(renderTrainingCalendar());
+    try{
+      wrap.appendChild(renderTrainingCalendar());
+    }catch(e){
+      console.error('Calendar render failed:', e);
+      const errCard = el(`<div class="card p-4 mb-4"></div>`);
+      errCard.appendChild(el(`<div class="text-sm text-[var(--alert)] mb-3">Couldn't load the calendar right now.</div>`));
+      const backBtn = el(`<button class="btn btn-ghost text-xs px-3 py-2 rounded-lg">← Back to Workout</button>`);
+      backBtn.onclick = ()=>{ showCalendar=false; calendarViewDate=null; render(); };
+      errCard.appendChild(backBtn);
+      wrap.appendChild(errCard);
+    }
     return wrap;
   }
 
