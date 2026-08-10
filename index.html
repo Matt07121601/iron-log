@@ -193,6 +193,7 @@ let state = {
   profile:{
     name:'', gender:'', ageYears:'', ageMonths:'',
     weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg',
+    measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'},
     goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:4, sessionMins:60, trainingTime:'AM',
     equipment:'', equipmentNotes:'', dietaryRestrictions:'', dietaryLikes:'', dietaryDislikes:'',
     programStartDate:''
@@ -278,6 +279,7 @@ function freshClientState(){
     profile:{
       name:'', gender:'', ageYears:'', ageMonths:'',
       weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg',
+      measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'},
       goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:4, sessionMins:60, trainingTime:'AM',
       equipment:'', equipmentNotes:'', dietaryRestrictions:'', dietaryLikes:'', dietaryDislikes:'',
       programStartDate:''
@@ -309,6 +311,7 @@ async function loadClientState(id){
   ensureProgramStartDate();
   ensureGoalsArray();
   ensureTrainingExperience();
+  ensureMeasurementsField();
   queueSave();
 }
 // Existing clients won't have a programStartDate saved (added alongside the
@@ -336,6 +339,11 @@ function ensureGoalsArray(){
 function ensureTrainingExperience(){
   if(state.profile.trainingExperience) return;
   state.profile.trainingExperience = 'intermediate';
+}
+// Existing clients predate the body-measurements feature entirely.
+function ensureMeasurementsField(){
+  if(state.profile.measurements && typeof state.profile.measurements==='object') return;
+  state.profile.measurements = {chest:'', waist:'', thigh:'', bicep:'', unit:'cm'};
 }
 // Existing clients already have a saved program with rest times generated under
 // the old uniform-per-day scheme. Recompute every exercise's rest time using the
@@ -564,6 +572,63 @@ function kgToStone(kg){
   const st = Math.floor(totalLbs/14);
   const lb = fmt1(totalLbs - st*14);
   return {st, lb};
+}
+/* ---- Body measurements: unit conversion + inferred insights ---- */
+function measurementToCm(value, unit){
+  const v = parseFloat(value);
+  if(!v && v!==0) return null;
+  return unit==='in' ? fmt1(v*2.54) : fmt1(v);
+}
+function measurementFromCm(cmValue, unit){
+  if(cmValue==null) return null;
+  return unit==='in' ? fmt1(cmValue/2.54) : fmt1(cmValue);
+}
+// Standard published waist-circumference risk bands (NHS/WHO general population
+// guidance) — informational only, not a diagnosis, and explicitly framed that way
+// wherever it's shown. Gender-specific because the thresholds are.
+function waistCategory(waistCm, gender){
+  if(!waistCm) return null;
+  if(gender==='female'){
+    if(waistCm < 80) return {level:'healthy', label:'Within general healthy-range guidance'};
+    if(waistCm < 88) return {level:'increased', label:'Above general healthy-range guidance'};
+    return {level:'high', label:'Well above general healthy-range guidance'};
+  }
+  // default to male thresholds if gender unset/other, since some baseline is
+  // more useful than silently showing nothing
+  if(waistCm < 94) return {level:'healthy', label:'Within general healthy-range guidance'};
+  if(waistCm < 102) return {level:'increased', label:'Above general healthy-range guidance'};
+  return {level:'high', label:'Well above general healthy-range guidance'};
+}
+// Pulls together whatever measurements exist into a short set of descriptive,
+// non-diagnostic insights for display. Returns null if no usable measurements.
+function measurementInsights(profile){
+  const m = profile.measurements;
+  if(!m) return null;
+  const unit = m.unit || 'cm';
+  const chestCm = measurementToCm(m.chest, unit);
+  const waistCm = measurementToCm(m.waist, unit);
+  const thighCm = measurementToCm(m.thigh, unit);
+  const bicepCm = measurementToCm(m.bicep, unit);
+  if(!chestCm && !waistCm && !thighCm && !bicepCm) return null;
+
+  const insights = [];
+  const cat = waistCategory(waistCm, profile.gender);
+  if(cat){
+    insights.push({
+      label:'Waist circumference',
+      text:`${cat.label} (general population guidance, not a personal diagnosis — worth discussing with a doctor if you have concerns).`,
+      level:cat.level
+    });
+  }
+  if(chestCm && waistCm){
+    const ratio = fmt1(chestCm/waistCm);
+    let note;
+    if(ratio >= 1.25) note = 'a pronounced chest-to-waist taper';
+    else if(ratio >= 1.1) note = 'a moderate chest-to-waist taper';
+    else note = 'a fairly even chest-to-waist ratio';
+    insights.push({label:'Chest : Waist ratio', text:`${ratio} : 1 — ${note}. A common physique reference point, not a health measure.`, level:'info'});
+  }
+  return insights.length ? insights : null;
 }
 // Occupational NEAT varies meaningfully independent of structured exercise —
 // a desk job vs. a physically demanding job affects total daily energy expenditure.
@@ -977,7 +1042,7 @@ async function submitCode(code){
 function logoutSession(){
   session = {role:null, clientId:null, clientName:null, viewingAsCoach:false};
   gateSubmitError = null; gateSetupError = null; gateError = null;
-  workoutEditMode = false; notificationsOpen = false; showCalendar = false; calendarViewDate = null; newCheckinDraft = {front:null, side:null, rear:null};
+  workoutEditMode = false; notificationsOpen = false; showCalendar = false; calendarViewDate = null; newCheckinDraft = {front:null, side:null, rear:null, measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'}};
   clearInterval(Timer.interval);
   $('timerBar') && $('timerBar').classList.add('hidden');
   chartInstances.forEach(c=>{ try{ c.destroy(); }catch(e){} });
@@ -989,7 +1054,7 @@ function coachOpenClient(clientId, name){
   session.clientId = clientId;
   session.clientName = name;
   session.viewingAsCoach = true;
-  checkinStatus = 'idle'; checkinDraft = null; workoutEditMode = false; notificationsOpen = false; showCalendar = false; calendarViewDate = null; newCheckinDraft = {front:null, side:null, rear:null};
+  checkinStatus = 'idle'; checkinDraft = null; workoutEditMode = false; notificationsOpen = false; showCalendar = false; calendarViewDate = null; newCheckinDraft = {front:null, side:null, rear:null, measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'}};
   gateBusy = true; render();
   loadClientState(clientId).then(()=>{ gateBusy=false; render(); });
 }
@@ -997,7 +1062,7 @@ function coachBackToDashboard(){
   session.clientId = null;
   session.clientName = null;
   session.viewingAsCoach = false;
-  checkinStatus = 'idle'; checkinDraft = null; workoutEditMode = false; notificationsOpen = false; showCalendar = false; calendarViewDate = null; newCheckinDraft = {front:null, side:null, rear:null};
+  checkinStatus = 'idle'; checkinDraft = null; workoutEditMode = false; notificationsOpen = false; showCalendar = false; calendarViewDate = null; newCheckinDraft = {front:null, side:null, rear:null, measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'}};
   clearInterval(Timer.interval);
   $('timerBar') && $('timerBar').classList.add('hidden');
   chartInstances.forEach(c=>{ try{ c.destroy(); }catch(e){} });
@@ -1487,6 +1552,23 @@ function renderOnboarding(){
     card.appendChild(hRow);
     if(p.heightFt) card.appendChild(el(`<div class="text-xs font-mono text-[var(--ink-2)] -mt-3 mb-3">≈ ${heightCm(p)} cm</div>`));
     card.appendChild(field('Body Fat % (optional — leave blank to estimate from photo later)', inputNum(p.bodyFatPct, v=>p.bodyFatPct=v)));
+
+    card.appendChild(el(`<div class="chalk-rule my-4"></div>`));
+    card.appendChild(el(`<div class="label mb-1">Body Measurements (optional)</div>`));
+    card.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-3">If you have a tape measure handy, these help build a fuller picture and let progress be tracked beyond just the scale. Skip any you don't have.</p>`));
+    const measUnitRow = el(`<div class="flex gap-1 mb-3 text-xs"></div>`);
+    ['cm','in'].forEach(u=>{
+      const b = el(`<button class="px-3 py-1.5 rounded ${(p.measurements.unit||'cm')===u?'btn-chalk':'btn-ghost'}">${u==='cm'?'Centimetres':'Inches'}</button>`);
+      b.onclick = ()=>{ p.measurements.unit=u; render(); };
+      measUnitRow.appendChild(b);
+    });
+    card.appendChild(measUnitRow);
+    const measGrid = el(`<div class="grid grid-cols-2 gap-3"></div>`);
+    const measUnit = p.measurements.unit||'cm';
+    [['chest','Chest'],['waist','Waist'],['thigh','Upper Thigh'],['bicep','Bicep']].forEach(([key,label])=>{
+      measGrid.appendChild(field(`${label} (${measUnit})`, inputNum(p.measurements[key], v=>p.measurements[key]=v)));
+    });
+    card.appendChild(measGrid);
   }
   else if(state.step===2){
     card.appendChild(el(`<h2 class="font-display text-xl mb-2">Body Type</h2>`));
@@ -2264,6 +2346,20 @@ function renderNutrition(){
     wrap.appendChild(el(`<div class="mb-6"></div>`));
   }
 
+  const measInsights = measurementInsights(state.profile);
+  if(measInsights){
+    const measCard = el(`<div class="card p-4 mb-8"></div>`);
+    measCard.appendChild(el(`<div class="label mb-3">From Your Body Measurements</div>`));
+    measInsights.forEach(ins=>{
+      const color = ins.level==='high' ? 'var(--alert)' : (ins.level==='increased' ? 'var(--chalk)' : 'var(--ink-1)');
+      const row = el(`<div class="mb-2 last:mb-0"></div>`);
+      row.appendChild(el(`<div class="text-xs font-mono text-[var(--ink-2)]">${ins.label}</div>`));
+      row.appendChild(el(`<div class="text-sm" style="color:${color};">${ins.text}</div>`));
+      measCard.appendChild(row);
+    });
+    wrap.appendChild(measCard);
+  }
+
   const grid = el(`<div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8"></div>`);
   [['Cutting', t.cutting, `For fat loss — ~${deficitPct}% deficit below TDEE, protein raised to 2.2g/kg to preserve lean mass.`],
    ['Maintenance', t.maintenance, 'For recomposition/strength/endurance — calories at TDEE, protein at 1.8g/kg.'],
@@ -2963,6 +3059,32 @@ function renderPhotos(){
   });
   wrap.appendChild(checkinGrid);
 
+  const hasBaselineMeasurements = state.profile.measurements && (state.profile.measurements.chest || state.profile.measurements.waist || state.profile.measurements.thigh || state.profile.measurements.bicep);
+  const measCard = el(`<div class="card p-3 mb-3"></div>`);
+  measCard.appendChild(el(`<div class="label mb-2">Measurements (optional)</div>`));
+  if(!hasBaselineMeasurements){
+    measCard.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-2">No starting measurements on file — these will just be saved with this check-in for future comparison.</p>`));
+  }
+  const measUnitRow2 = el(`<div class="flex gap-1 mb-2 text-xs"></div>`);
+  ['cm','in'].forEach(u=>{
+    const b = el(`<button class="px-3 py-1.5 rounded ${(newCheckinDraft.measurements.unit||'cm')===u?'btn-chalk':'btn-ghost'}">${u==='cm'?'Centimetres':'Inches'}</button>`);
+    b.onclick = ()=>{ newCheckinDraft.measurements.unit=u; render(); };
+    measUnitRow2.appendChild(b);
+  });
+  measCard.appendChild(measUnitRow2);
+  const checkinMeasUnit = newCheckinDraft.measurements.unit||'cm';
+  const measGrid2 = el(`<div class="grid grid-cols-2 gap-3"></div>`);
+  [['chest','Chest'],['waist','Waist'],['thigh','Upper Thigh'],['bicep','Bicep']].forEach(([key,label])=>{
+    const inp = el(`<input type="number" placeholder="${checkinMeasUnit}" value="${newCheckinDraft.measurements[key]||''}">`);
+    inp.oninput = (e)=>{ newCheckinDraft.measurements[key]=e.target.value; };
+    const f = el(`<div></div>`);
+    f.appendChild(el(`<div class="label mb-1.5">${label} (${checkinMeasUnit})</div>`));
+    f.appendChild(inp);
+    measGrid2.appendChild(f);
+  });
+  measCard.appendChild(measGrid2);
+  wrap.appendChild(measCard);
+
   const hasDraft = newCheckinDraft.front || newCheckinDraft.side || newCheckinDraft.rear;
   const submitCheckinBtn = el(`<button class="btn btn-chalk px-5 py-3 rounded-lg mb-8 ${(!hasDraft || !hasBaseline)?'opacity-40 pointer-events-none':''}">Save Check-In & Analyze</button>`);
   submitCheckinBtn.onclick = submitCheckin;
@@ -2981,6 +3103,8 @@ function renderPhotos(){
       if(ci[key]) thumbRow.appendChild(el(`<img src="${ci[key]}" class="w-full h-24 object-cover rounded">`));
     });
     card.appendChild(thumbRow);
+    const deltaRow = renderMeasurementDeltas(ci.measurements, state.profile.measurements);
+    if(deltaRow) card.appendChild(deltaRow);
     if(!analysisEntry || analysisEntry.status==='loading'){
       card.appendChild(el(`<div class="flex items-center gap-2 text-xs text-[var(--ink-2)]"><div class="w-3 h-3 border-2 border-[var(--chalk)] border-t-transparent rounded-full spin"></div> Analyzing...</div>`));
     } else if(analysisEntry.status==='error'){
@@ -3036,7 +3160,40 @@ function renderBaselineAnalysisCard(r){
   return card;
 }
 
-let newCheckinDraft = {front:null, side:null, rear:null};
+let newCheckinDraft = {front:null, side:null, rear:null, measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'}};
+
+// Compares a check-in's measurements against the client's baseline (from
+// onboarding), converting units as needed, and renders the deltas — this is
+// what lets a client see "waist -2cm since baseline" alongside their photos.
+function renderMeasurementDeltas(checkinMeasurements, baselineMeasurements){
+  if(!checkinMeasurements) return null;
+  const hasAny = ['chest','waist','thigh','bicep'].some(k=>checkinMeasurements[k]);
+  if(!hasAny) return null;
+  const displayUnit = checkinMeasurements.unit || 'cm';
+  const row = el(`<div class="mb-3 p-2 rounded-lg bg-[var(--bg-2)]"></div>`);
+  row.appendChild(el(`<div class="label mb-1">Measurements</div>`));
+  const items = el(`<div class="grid grid-cols-2 gap-x-3 gap-y-1 text-xs font-mono"></div>`);
+  [['chest','Chest'],['waist','Waist'],['thigh','Thigh'],['bicep','Bicep']].forEach(([key,label])=>{
+    const val = checkinMeasurements[key];
+    if(!val) return;
+    const valCm = measurementToCm(val, displayUnit);
+    const displayVal = measurementFromCm(valCm, displayUnit);
+    let deltaText = '';
+    if(baselineMeasurements && baselineMeasurements[key]){
+      const baseCm = measurementToCm(baselineMeasurements[key], baselineMeasurements.unit||'cm');
+      if(baseCm!=null){
+        const deltaCm = fmt1(valCm - baseCm);
+        const deltaDisplay = measurementFromCm(Math.abs(deltaCm), displayUnit);
+        const sign = deltaCm > 0 ? '+' : (deltaCm < 0 ? '−' : '');
+        const color = deltaCm===0 ? 'var(--ink-2)' : 'var(--ink-1)';
+        deltaText = ` <span style="color:${color};">(${sign}${deltaDisplay}${displayUnit})</span>`;
+      }
+    }
+    items.appendChild(el(`<div class="text-[var(--ink-1)]">${label}: ${displayVal}${displayUnit}${deltaText}</div>`));
+  });
+  row.appendChild(items);
+  return row;
+}
 
 async function runBaselineAnalysis(){
   state.analysis.baseline.status='loading'; render();
@@ -3087,10 +3244,10 @@ Keep total output under 180 words. Do not mention weight loss drugs or supplemen
 
 async function submitCheckin(){
   const id = genCode(8);
-  const checkin = {id, date:todayISO(), front:newCheckinDraft.front, side:newCheckinDraft.side, rear:newCheckinDraft.rear};
+  const checkin = {id, date:todayISO(), front:newCheckinDraft.front, side:newCheckinDraft.side, rear:newCheckinDraft.rear, measurements: Object.assign({}, newCheckinDraft.measurements)};
   state.photos.checkins = state.photos.checkins || [];
   state.photos.checkins.push(checkin);
-  newCheckinDraft = {front:null, side:null, rear:null};
+  newCheckinDraft = {front:null, side:null, rear:null, measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'}};
   queueSave(); render();
   await runCheckinAnalysis(checkin);
 }
