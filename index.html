@@ -193,7 +193,7 @@ let state = {
   profile:{
     name:'', gender:'', ageYears:'', ageMonths:'',
     weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg',
-    goal:'', goals:[], work:'', activityLevel:'', daysPerWeek:4, sessionMins:60, trainingTime:'AM',
+    goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:4, sessionMins:60, trainingTime:'AM',
     equipment:'', equipmentNotes:'', dietaryRestrictions:'', dietaryLikes:'', dietaryDislikes:'',
     programStartDate:''
   },
@@ -278,7 +278,7 @@ function freshClientState(){
     profile:{
       name:'', gender:'', ageYears:'', ageMonths:'',
       weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg',
-      goal:'', goals:[], work:'', activityLevel:'', daysPerWeek:4, sessionMins:60, trainingTime:'AM',
+      goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:4, sessionMins:60, trainingTime:'AM',
       equipment:'', equipmentNotes:'', dietaryRestrictions:'', dietaryLikes:'', dietaryDislikes:'',
       programStartDate:''
     },
@@ -308,6 +308,7 @@ async function loadClientState(id){
   normalizeProgramRestTimes();
   ensureProgramStartDate();
   ensureGoalsArray();
+  ensureTrainingExperience();
   queueSave();
 }
 // Existing clients won't have a programStartDate saved (added alongside the
@@ -327,6 +328,14 @@ function ensureProgramStartDate(){
 function ensureGoalsArray(){
   if(Array.isArray(state.profile.goals) && state.profile.goals.length>0) return;
   state.profile.goals = state.profile.goal ? [state.profile.goal] : [];
+}
+// Existing clients predate the training-experience field. Default them to
+// Intermediate, which is the neutral 1x baseline everything else was already
+// calibrated around — so this changes nothing for them until they actively
+// pick Novice or Advanced themselves.
+function ensureTrainingExperience(){
+  if(state.profile.trainingExperience) return;
+  state.profile.trainingExperience = 'intermediate';
 }
 // Existing clients already have a saved program with rest times generated under
 // the old uniform-per-day scheme. Recompute every exercise's rest time using the
@@ -713,13 +722,14 @@ function buildProgram(p){
   const goalsList = (Array.isArray(p.goals) && p.goals.length) ? p.goals : (p.goal ? [p.goal] : ['recomp']);
   const baseScheme = blendedGoalScheme(goalsList);
   const bodyMods = applyBodyTypeModifiers(p.bodyType);
+  const expMods = applyExperienceModifiers(p.trainingExperience);
   const scheme = {
-    sets: Math.max(2, Math.min(6, Math.round(baseScheme.sets * bodyMods.volumeMult))),
+    sets: Math.max(2, Math.min(6, Math.round(baseScheme.sets * bodyMods.volumeMult * expMods.volumeMult))),
     reps: baseScheme.reps,
     rir: baseScheme.rir,
     label: baseScheme.label
   };
-  const exCount = Math.max(4, Math.min(8, Math.floor((parseInt(p.sessionMins)||60)/9)));
+  const exCount = Math.max(3, Math.min(9, Math.floor((parseInt(p.sessionMins)||60)/9) + expMods.exerciseCountAdjust));
 
   let template;
   if(days<=2) template = [{name:'Full Body A', pool:'full'},{name:'Full Body B', pool:'full'}];
@@ -826,6 +836,12 @@ function suggestNextWeight(dayName, exerciseName, repRange){
   } else {
     mult = 1.0; reason = 'right at target — repeat this weight';
   }
+  // Scale how big that jump (or deload) is by training experience: novices tend
+  // to adapt faster and can handle bigger week-to-week jumps ("newbie gains"),
+  // while advanced lifters progress more conservatively as gains slow down.
+  // Intermediate is the calibration baseline, so it applies no scaling at all.
+  const expScale = applyExperienceModifiers(state.profile.trainingExperience).progressionScale;
+  mult = 1 + (mult - 1) * expScale;
   return { suggested: fmt1(maxWeight*mult), lastWeight:maxWeight, lastRpe:fmt1(avgRpe), lastReps:fmt1(avgReps), reason };
 }
 
@@ -1311,7 +1327,7 @@ function renderHeader(){
 }
 
 /* ============================= ONBOARDING ============================= */
-const TOTAL_STEPS = 8;
+const TOTAL_STEPS = 9;
 let onboardError = null;
 function validateStep(step, p){
   if(step===0){
@@ -1325,6 +1341,9 @@ function validateStep(step, p){
   }
   else if(step===3){
     if(!p.goals || p.goals.length===0) return 'Please select at least one goal — this drives your whole program.';
+  }
+  else if(step===8){
+    if(!p.trainingExperience) return 'Please select your training experience level.';
   }
   else if(step===4){
     if(!p.work) return 'Please select your day-to-day work type.';
@@ -1374,6 +1393,33 @@ function applyBodyTypeModifiers(bodyType){
     endomorph: {surplusMult:0.85, deficitMult:1.15, volumeMult:1.08, restAddSec:-10, conditioning:true}
   };
   return mods[bodyType] || mods.mesomorph;
+}
+
+// Training experience — factored into overall volume, how many exercises fit
+// into a session, and how aggressively week-to-week progression is applied.
+// Intermediate is the calibration baseline the rest of the app's defaults are
+// built around, so it stays neutral (1x) on every dimension.
+const EXPERIENCE_LEVELS = [
+  {
+    key:'novice', label:'Novice',
+    desc:"New to structured training, or returning after a long break (roughly under 6 months of consistent lifting). Program uses lower overall volume and fewer exercises per session while movement patterns are still being learned, with faster week-to-week progression since early gains tend to come quickly."
+  },
+  {
+    key:'intermediate', label:'Intermediate',
+    desc:"Training consistently for roughly 6 months to 2 years, comfortable with the main lifts and already applying progressive overload. This is the baseline the app's defaults are calibrated around."
+  },
+  {
+    key:'advanced', label:'Advanced',
+    desc:"2+ years of consistent, structured training with a solid technical base. Program uses higher overall volume and more exercises per session to match greater work capacity, with more conservative week-to-week progression since gains come more slowly at this stage."
+  }
+];
+function applyExperienceModifiers(level){
+  const mods = {
+    novice: {volumeMult:0.8, exerciseCountAdjust:-1, progressionScale:1.3},
+    intermediate: {volumeMult:1.0, exerciseCountAdjust:0, progressionScale:1.0},
+    advanced: {volumeMult:1.15, exerciseCountAdjust:1, progressionScale:0.7}
+  };
+  return mods[level] || mods.intermediate;
 }
 
 function renderOnboarding(){
@@ -1514,6 +1560,22 @@ function renderOnboarding(){
     const skip = el(`<button class="text-xs text-[var(--ink-2)] underline underline-offset-2 mt-4">Skip for now — I'll add these later from the Photos tab</button>`);
     skip.onclick = ()=>{ handleOnboardNext(); };
     card.appendChild(skip);
+  }
+  else if(state.step===8){
+    card.appendChild(el(`<h2 class="font-display text-xl mb-2">Training Experience</h2>`));
+    card.appendChild(el(`<p class="text-sm text-[var(--ink-2)] mb-4">This shapes how much volume your program uses, how many exercises fit into a session, and how quickly weights progress week to week.</p>`));
+    const grid = el(`<div class="space-y-2"></div>`);
+    EXPERIENCE_LEVELS.forEach(lvl=>{
+      const active = p.trainingExperience===lvl.key;
+      const opt = el(`
+        <button class="w-full text-left p-4 rounded-lg border ${active?'border-[var(--chalk)] bg-[var(--bg-2)]':'border-[var(--line)]'} transition">
+          <div class="font-display font-semibold ${active?'text-[var(--chalk)]':''}">${lvl.label}</div>
+          <div class="text-sm text-[var(--ink-2)] mt-1">${lvl.desc}</div>
+        </button>`);
+      opt.onclick = ()=>{ p.trainingExperience=lvl.key; render(); };
+      grid.appendChild(opt);
+    });
+    card.appendChild(grid);
   }
 
   wrap.appendChild(card);
@@ -1957,6 +2019,19 @@ function renderWorkoutView(){
   }
   if(!workoutEditMode && state.analysis.baseline.status==='done' && state.analysis.baseline.result && state.analysis.baseline.result.trainingFocus){
     wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-4"><span style="color:var(--chalk);">From your photo comparison:</span> ${state.analysis.baseline.result.trainingFocus}</p>`));
+  }
+  if(!workoutEditMode && state.profile.trainingExperience){
+    const expLvl = EXPERIENCE_LEVELS.find(l=>l.key===state.profile.trainingExperience);
+    const expMods = applyExperienceModifiers(state.profile.trainingExperience);
+    if(expLvl && state.profile.trainingExperience!=='intermediate'){
+      const expNotes = [];
+      if(expMods.volumeMult<1) expNotes.push('reduced set volume');
+      if(expMods.volumeMult>1) expNotes.push('increased set volume');
+      if(expMods.exerciseCountAdjust<0) expNotes.push('fewer exercises per session');
+      if(expMods.exerciseCountAdjust>0) expNotes.push('more exercises per session');
+      expNotes.push(state.profile.trainingExperience==='novice' ? 'faster week-to-week progression' : 'more conservative week-to-week progression');
+      wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-4">Tailored for ${expLvl.label} experience: ${expNotes.join(', ')}.</p>`));
+    }
   }
 
   const day = state.program[state.activeDayIndex];
