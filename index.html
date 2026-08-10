@@ -1857,30 +1857,55 @@ function computeAdaptiveSchedule(horizonDate){
   const today = todayISO();
   const horizon = horizonDate || addDaysISO(today, 10);
 
-  let cursor = nextTrainingDateOnOrAfter(startDate, weekdaySlots);
   let pointer = 0;
+  let dueDate = nextTrainingDateOnOrAfter(startDate, weekdaySlots);
   const entries = [];
+  let cursor = startDate;
   let safety = 0;
-  while(cursor <= horizon && safety < 1000){
+
+  // Phase 1: walk day-by-day up through today. Checking EVERY day (not just the
+  // officially-scheduled training weekdays) for a completed session is what lets
+  // a client log a workout early/out of pattern and have the whole remaining
+  // schedule shift backward in response — not just "not missed", genuinely ahead.
+  while(cursor <= today && safety < 2000){
     safety++;
     const day = program[pointer % program.length];
-    const isPastDate = cursor < today;
-    const completed = wasSessionCompleted(day.name, cursor);
-    let status;
-    if(completed) status = 'completed';
-    else if(cursor === today) status = 'today';
-    else if(isPastDate) status = 'missed';
-    else status = 'upcoming';
-
-    entries.push({date:cursor, dayName:day.name, status});
-
-    if(isPastDate && !completed){
-      cursor = nextTrainingDateOnOrAfter(addDaysISO(cursor,1), weekdaySlots);
-    } else {
+    if(wasSessionCompleted(day.name, cursor)){
+      entries.push({date:cursor, dayName:day.name, status:'completed'});
       pointer++;
-      cursor = nextTrainingDateOnOrAfter(addDaysISO(cursor,1), weekdaySlots);
+      dueDate = nextTrainingDateOnOrAfter(addDaysISO(cursor,1), weekdaySlots);
+    } else if(cursor === dueDate){
+      const status = cursor < today ? 'missed' : 'today';
+      entries.push({date:cursor, dayName:day.name, status});
+      if(cursor < today){
+        // still not done and now in the past — push this same due session
+        // forward to the next available slot; pointer stays put since it's
+        // still owed, which is what shifts every later session forward too.
+        dueDate = nextTrainingDateOnOrAfter(addDaysISO(cursor,1), weekdaySlots);
+      }
+      // if it's today's slot, leave dueDate/pointer as-is — still due until logged
     }
+    cursor = addDaysISO(cursor,1);
   }
+
+  // Phase 2: from the first still-open slot onward, the future is unresolved by
+  // definition, so just lay out straightforward upcoming entries in rotation.
+  let futureCursor = dueDate;
+  let futurePointer = pointer;
+  if(futureCursor <= today){
+    // today's slot was already added above as 'today' and left unresolved —
+    // start the upcoming list from the slot after it instead of repeating it.
+    futureCursor = nextTrainingDateOnOrAfter(addDaysISO(today,1), weekdaySlots);
+    futurePointer++;
+  }
+  while(futureCursor <= horizon && safety < 2000){
+    safety++;
+    const day = program[futurePointer % program.length];
+    entries.push({date:futureCursor, dayName:day.name, status:'upcoming'});
+    futurePointer++;
+    futureCursor = nextTrainingDateOnOrAfter(addDaysISO(futureCursor,1), weekdaySlots);
+  }
+
   return entries;
 }
 
@@ -1941,13 +1966,12 @@ function renderTrainingCalendar(){
       const color = CAL_STATUS_COLOR[entry.status];
       cell.appendChild(el(`<div style="width:7px; height:7px; border-radius:50%; background:${color}; margin:3px 0; box-shadow:0 0 5px ${color};"></div>`));
       cell.appendChild(el(`<div class="font-mono" style="font-size:10px; font-weight:600; line-height:1.1; color:${color};">${entry.dayName}</div>`));
-      if(entry.status==='today'){
-        cell.style.cursor = 'pointer';
-        cell.onclick = ()=>{
-          const idx = state.program.findIndex(d=>d.name===entry.dayName);
-          if(idx>=0){ state.activeDayIndex=idx; showCalendar=false; calendarViewDate=null; render(); }
-        };
-      }
+      cell.style.cursor = 'pointer';
+      cell.title = `${entry.dayName} — ${CAL_STATUS_LABEL[entry.status]}`;
+      cell.onclick = ()=>{
+        const idx = state.program.findIndex(d=>d.name===entry.dayName);
+        if(idx>=0){ state.activeDayIndex=idx; showCalendar=false; calendarViewDate=null; render(); }
+      };
     }
     grid.appendChild(cell);
     cursor = addDaysISO(cursor,1);
