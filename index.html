@@ -421,13 +421,20 @@ async function tryMigrateLegacyData(){
 
 /* ============================= UTIL ============================= */
 const $ = (id)=>document.getElementById(id);
-const todayISO = ()=> new Date().toISOString().slice(0,10);
+// Formats a Date using its LOCAL calendar date (year/month/day as the user's
+// clock actually shows them) — deliberately not toISOString(), which converts
+// through UTC first and can silently roll the date back a day for anyone in a
+// positive UTC-offset timezone (e.g. UK during British Summer Time, UTC+1).
+function toLocalISODate(d){
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+const todayISO = ()=> toLocalISODate(new Date());
 const fmt1 = (n)=> Math.round(n*10)/10;
 function addDaysISO(dateStr, days){
   const d = new Date((dateStr||todayISO())+'T00:00:00');
   if(isNaN(d.getTime())) return todayISO();
   d.setDate(d.getDate()+days);
-  return d.toISOString().slice(0,10);
+  return toLocalISODate(d);
 }
 function formatCalendarDate(dateStr){
   const d = new Date(dateStr+'T00:00:00');
@@ -442,13 +449,13 @@ function endOfMonth(dateStr){
   const d = new Date((dateStr||todayISO())+'T00:00:00');
   if(isNaN(d.getTime())) return endOfMonth(todayISO());
   const end = new Date(d.getFullYear(), d.getMonth()+1, 0);
-  return end.toISOString().slice(0,10);
+  return toLocalISODate(end);
 }
 function addMonthsISO(dateStr, months){
   const d = new Date((dateStr||todayISO())+'T00:00:00');
   if(isNaN(d.getTime())) return addMonthsISO(todayISO(), months);
   d.setMonth(d.getMonth()+months);
-  return d.toISOString().slice(0,10);
+  return toLocalISODate(d);
 }
 function el(html){ const t=document.createElement('template'); t.innerHTML=html.trim(); return t.content.firstChild; }
 
@@ -870,7 +877,7 @@ function render(){
     root.appendChild(renderQuoteOverlay());
   }
 }
-function setView(v){ state.view=v; render(); window.scrollTo(0,0); }
+function setView(v){ state.view=v; notificationsOpen=false; render(); window.scrollTo(0,0); }
 
 /* ============================= GATE / SESSION ============================= */
 function renderGate(){
@@ -1980,7 +1987,7 @@ function renderWorkoutView(){
   });
   controlsRow.appendChild(unitToggle);
   const calBtn = el(`<button class="btn btn-ghost text-xs px-3 py-2 rounded-lg">📅 Calendar</button>`);
-  calBtn.onclick = ()=>{ showCalendar = !showCalendar; render(); };
+  calBtn.onclick = ()=>{ showCalendar = !showCalendar; notificationsOpen = false; render(); };
   controlsRow.appendChild(calBtn);
   if(isCoachEditor){
     const editBtn = el(`<button class="btn ${workoutEditMode?'btn-alert':'btn-ghost'} text-xs px-3 py-2 rounded-lg">${workoutEditMode?'Done Editing':'Edit Program'}</button>`);
@@ -2818,9 +2825,9 @@ function toggleNotifications(){
 }
 function renderNotificationBell(){
   const unread = (state.notifications||[]).filter(n=>!n.read).length;
-  const wrap = el(`<div class="relative"></div>`);
+  const wrap = el(`<div class="relative notif-wrap"></div>`);
   const btn = el(`<button class="btn btn-ghost text-xs px-3 py-2 rounded-lg relative" title="Notifications">🔔${unread>0?`<span class="absolute -top-1.5 -right-1.5 bg-[var(--alert)] text-[#1B1B1E] text-[10px] font-bold rounded-full w-4 h-4 flex items-center justify-center">${unread>9?'9+':unread}</span>`:''}</button>`);
-  btn.onclick = toggleNotifications;
+  btn.onclick = (e)=>{ e.stopPropagation(); toggleNotifications(); };
   wrap.appendChild(btn);
   if(notificationsOpen){
     const panel = el(`<div class="absolute right-0 mt-2 w-72 max-h-80 overflow-y-auto card p-3 z-40 shadow-xl"></div>`);
@@ -3097,6 +3104,16 @@ Keep total output under 100 words. Be encouraging and evidence-based.`});
 }
 
 /* ============================= INIT ============================= */
+// Closes the notifications panel on any click outside it — the panel's own
+// content stops its clicks from reaching here, so this only fires for genuine
+// "clicked elsewhere" cases, including elsewhere within the same tab (the
+// bug this fixes: the panel could otherwise stay open indefinitely and
+// silently sit on top of controls on the right side of the screen, like the
+// calendar's forward-month button).
+document.addEventListener('click', ()=>{
+  if(notificationsOpen){ notificationsOpen = false; render(); }
+});
+
 loadAll();
 </script>
 </body>
