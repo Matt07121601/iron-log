@@ -193,7 +193,7 @@ let state = {
   profile:{
     name:'', gender:'', ageYears:'', ageMonths:'',
     weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg',
-    goal:'', work:'', activityLevel:'', daysPerWeek:4, sessionMins:60, trainingTime:'AM',
+    goal:'', goals:[], work:'', activityLevel:'', daysPerWeek:4, sessionMins:60, trainingTime:'AM',
     equipment:'', equipmentNotes:'', dietaryRestrictions:'', dietaryLikes:'', dietaryDislikes:'',
     programStartDate:''
   },
@@ -278,7 +278,7 @@ function freshClientState(){
     profile:{
       name:'', gender:'', ageYears:'', ageMonths:'',
       weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg',
-      goal:'', work:'', activityLevel:'', daysPerWeek:4, sessionMins:60, trainingTime:'AM',
+      goal:'', goals:[], work:'', activityLevel:'', daysPerWeek:4, sessionMins:60, trainingTime:'AM',
       equipment:'', equipmentNotes:'', dietaryRestrictions:'', dietaryLikes:'', dietaryDislikes:'',
       programStartDate:''
     },
@@ -307,6 +307,7 @@ async function loadClientState(id){
   normalizeClientPhotosAndAnalysis();
   normalizeProgramRestTimes();
   ensureProgramStartDate();
+  ensureGoalsArray();
   queueSave();
 }
 // Existing clients won't have a programStartDate saved (added alongside the
@@ -320,6 +321,13 @@ function ensureProgramStartDate(){
   const all = [...workoutDates, ...bwDates, ...foodDates].sort();
   state.profile.programStartDate = all.length ? all[0] : todayISO();
 }
+// Existing clients only ever had a single profile.goal string. Backfill the new
+// multi-select profile.goals array from it so their program keeps working exactly
+// as before until they actively pick additional goals themselves.
+function ensureGoalsArray(){
+  if(Array.isArray(state.profile.goals) && state.profile.goals.length>0) return;
+  state.profile.goals = state.profile.goal ? [state.profile.goal] : [];
+}
 // Existing clients already have a saved program with rest times generated under
 // the old uniform-per-day scheme. Recompute every exercise's rest time using the
 // current compound/isolation rule, so existing clients get the update too, not
@@ -327,10 +335,11 @@ function ensureProgramStartDate(){
 function normalizeProgramRestTimes(){
   if(!Array.isArray(state.program)) return;
   const bodyMods = applyBodyTypeModifiers(state.profile.bodyType);
+  const goalsList = (Array.isArray(state.profile.goals) && state.profile.goals.length) ? state.profile.goals : (state.profile.goal ? [state.profile.goal] : ['recomp']);
   state.program.forEach(day=>{
     (day.exercises||[]).forEach(ex=>{
       if(ex.muscle === 'Conditioning') return; // leave the cardio finisher alone
-      ex.restSec = restSecForExercise(ex.name, state.profile.goal, bodyMods);
+      ex.restSec = restSecForExercise(ex.name, goalsList, bodyMods);
     });
   });
 }
@@ -584,6 +593,30 @@ function goalToCalorieKey(goal){
   if(goal==='endurance') return 'maintenance';
   return 'maintenance';
 }
+// Multi-goal aware version: fat loss + muscle together reads as a recomposition
+// approach (maintenance calories, not a straight cut or bulk); fat loss alone
+// keeps a deficit; muscle alone keeps a surplus; everything else defaults to
+// maintenance, which is the safest baseline when goals don't imply a clear
+// calorie direction (strength/recomp/endurance, alone or combined).
+function goalsToCalorieKey(goals){
+  const g = Array.isArray(goals) ? goals : (goals ? [goals] : []);
+  if(g.includes('fatloss') && g.includes('muscle')) return 'maintenance';
+  if(g.includes('fatloss')) return 'cutting';
+  if(g.includes('muscle')) return 'bulking';
+  return 'maintenance';
+}
+function goalsLabel(goals){
+  const g = Array.isArray(goals) ? goals : (goals ? [goals] : []);
+  if(g.length===0) return '';
+  return g.map(k=>{ const found = GOALS.find(x=>x.key===k); return found ? found.label : k; }).join(' + ');
+}
+// Effective calorie key for the current profile, blending across every
+// selected goal (with a fallback to the legacy single-goal field for any
+// client whose data predates multi-select).
+function profileCalorieKey(profile){
+  const goalsList = (Array.isArray(profile.goals) && profile.goals.length) ? profile.goals : (profile.goal ? [profile.goal] : []);
+  return goalsToCalorieKey(goalsList);
+}
 
 /* ============================= EXERCISE LIBRARY ============================= */
 const EX = {
@@ -631,9 +664,12 @@ function isCompoundExercise(name){
 // compound lifts 120-180s (2-3 min), isolation lifts 90-150s (1:30-2:30).
 const COMPOUND_REST_BY_GOAL = {fatloss:120, muscle:150, strength:180, recomp:135, endurance:120};
 const ISOLATION_REST_BY_GOAL = {fatloss:90, muscle:120, strength:150, recomp:105, endurance:90};
-function restSecForExercise(name, goal, bodyMods){
+function restSecForExercise(name, goals, bodyMods){
+  const g = Array.isArray(goals) ? goals : (goals ? [goals] : []);
+  const list = g.length ? g : ['recomp'];
   const compound = isCompoundExercise(name);
-  const base = compound ? (COMPOUND_REST_BY_GOAL[goal]||150) : (ISOLATION_REST_BY_GOAL[goal]||120);
+  const table = compound ? COMPOUND_REST_BY_GOAL : ISOLATION_REST_BY_GOAL;
+  const base = Math.round(list.reduce((sum,gl)=> sum + (table[gl]||150), 0) / list.length);
   const withMods = base + ((bodyMods && bodyMods.restAddSec) || 0);
   const lo = compound ? 120 : 90;
   const hi = compound ? 180 : 150;
@@ -649,10 +685,33 @@ function goalScheme(goal){
   };
   return schemes[goal] || schemes.recomp;
 }
+// Blends multiple selected goals into one coherent set/rep/RIR prescription:
+// sets are averaged, rep and RIR ranges are widened to span every selected
+// goal's range (e.g. Strength + Hypertrophy -> a 3-12 rep range covering both),
+// rather than one goal silently overriding the others.
+function blendedGoalScheme(goals){
+  const g = Array.isArray(goals) ? goals.filter(Boolean) : (goals ? [goals] : []);
+  const list = g.length ? g : ['recomp'];
+  const schemes = list.map(goalScheme);
+  const avgSets = Math.round(schemes.reduce((s,x)=>s+x.sets,0) / schemes.length);
+  const repBounds = schemes.map(x=>parseRepRange(x.reps));
+  const repMin = Math.min(...repBounds.map(b=>b.min));
+  const repMax = Math.max(...repBounds.map(b=>b.max));
+  const rirBounds = schemes.map(x=>parseRepRange(x.rir));
+  const rirMin = Math.min(...rirBounds.map(b=>b.min));
+  const rirMax = Math.max(...rirBounds.map(b=>b.max));
+  return {
+    sets: avgSets,
+    reps: repMin===repMax ? `${repMin}` : `${repMin}-${repMax}`,
+    rir: rirMin===rirMax ? `${rirMin}` : `${rirMin}-${rirMax}`,
+    label: list.map(gl=>goalScheme(gl).label).join(' + ')
+  };
+}
 function buildProgram(p){
   const days = parseInt(p.daysPerWeek)||3;
   const lib = EX[p.equipment] || EX.gym;
-  const baseScheme = goalScheme(p.goal);
+  const goalsList = (Array.isArray(p.goals) && p.goals.length) ? p.goals : (p.goal ? [p.goal] : ['recomp']);
+  const baseScheme = blendedGoalScheme(goalsList);
   const bodyMods = applyBodyTypeModifiers(p.bodyType);
   const scheme = {
     sets: Math.max(2, Math.min(6, Math.round(baseScheme.sets * bodyMods.volumeMult))),
@@ -689,7 +748,7 @@ function buildProgram(p){
     const rotated = pool.slice(offset).concat(pool.slice(0, offset));
     const chosen = rotated.slice(0, exCount);
     const exercises = chosen.map(e=>({
-      name:e.n, muscle:e.m, sets:scheme.sets, repRange:scheme.reps, rir:scheme.rir, restSec:restSecForExercise(e.n, p.goal, bodyMods)
+      name:e.n, muscle:e.m, sets:scheme.sets, repRange:scheme.reps, rir:scheme.rir, restSec:restSecForExercise(e.n, goalsList, bodyMods)
     }));
     // Endomorph modifier: add a conditioning finisher, since higher NEAT/cardio inclusion
     // is a reasonable, low-risk addition regardless of resistance-training goal.
@@ -1124,17 +1183,17 @@ function computeNutritionSuggestion(){
   const firstHalfAvg = recent.slice(0,mid).reduce((a,e)=>a+e.weightKg,0)/mid;
   const secondHalfAvg = recent.slice(mid).reduce((a,e)=>a+e.weightKg,0)/(recent.length-mid);
   const delta = fmt1(secondHalfAvg-firstHalfAvg);
-  const goal = state.profile.goal;
-  if(goal==='fatloss' && delta > -0.2){
+  const goalsList = (Array.isArray(state.profile.goals) && state.profile.goals.length) ? state.profile.goals : (state.profile.goal ? [state.profile.goal] : []);
+  if(goalsList.includes('fatloss') && delta > -0.2){
     return {text:`Weight trend is roughly flat (${delta}kg) over the recent logging window despite a fat-loss goal. Consider reducing target calories by ~150kcal/day.`, amount:-150};
   }
-  if(goal==='muscle' && delta < 0.1){
+  if(goalsList.includes('muscle') && delta < 0.1){
     return {text:`Weight trend is roughly flat (${delta}kg) over the recent logging window despite a muscle-gain goal. Consider adding ~150kcal/day.`, amount:150};
   }
   return null;
 }
 function applyNutritionSuggestion(sugg){
-  const calKey = goalToCalorieKey(state.profile.goal);
+  const calKey = profileCalorieKey(state.profile);
   const t = state.targets[calKey];
   t.calories += sugg.amount;
   const proteinCal = t.protein.g*4, fatCal = t.fat.g*9;
@@ -1155,7 +1214,7 @@ async function generateCheckinDraft(){
     const sessionsLogged = Object.values(state.logs.workouts||{}).filter(w=>Object.values(w.exercises||{}).some(sets=>sets.some(x=>x.done))).length;
     const foodDaysLogged = Object.keys(state.logs.food||{}).length;
 
-    const prompt = `You are a supportive, professional personal trainer writing a short weekly check-in message to your client ${state.profile.name||'the client'}, whose goal is ${state.profile.goal||'general fitness'}.
+    const prompt = `You are a supportive, professional personal trainer writing a short weekly check-in message to your client ${state.profile.name||'the client'}, whose goal(s) are ${goalsLabel(state.profile.goals) || state.profile.goal || 'general fitness'}.
 Data: latest bodyweight ${latestWeight!=null?latestWeight+'kg':'not logged'}, change since first log ${weightChange!=null?weightChange+'kg':'not enough data yet'}, ${sessionsLogged} workout sessions logged, ${foodDaysLogged} days of food logged recently.
 Write a warm, encouraging, specific 3-4 sentence check-in message the coach can send directly to the client via text message. Mention one concrete positive and one gentle, actionable focus for next week. No emojis. No clinical or diagnostic language. Respond with only the message text, nothing else.`;
 
@@ -1228,7 +1287,7 @@ function renderHeader(){
       </div>
       <div class="flex items-center gap-3">
         <div class="hidden sm:block text-xs font-mono text-[var(--ink-2)]">
-          <span>${state.profile.goal ? goalScheme(state.profile.goal).label : ''}</span>
+          <span>${goalsLabel(state.profile.goals) || (state.profile.goal ? goalScheme(state.profile.goal).label : '')}</span>
         </div>
         <div id="notifBellSlot"></div>
         ${session.role==='client' ? '<button id="logoutBtn" class="btn btn-ghost text-xs px-3 py-2 rounded-lg">Log Out</button>' : ''}
@@ -1265,7 +1324,7 @@ function validateStep(step, p){
     if(totalIn<=0) return 'Please enter your height.';
   }
   else if(step===3){
-    if(!p.goal) return 'Please select a primary goal — this drives your whole program.';
+    if(!p.goals || p.goals.length===0) return 'Please select at least one goal — this drives your whole program.';
   }
   else if(step===4){
     if(!p.work) return 'Please select your day-to-day work type.';
@@ -1379,16 +1438,26 @@ function renderOnboarding(){
     card.appendChild(skip);
   }
   else if(state.step===3){
-    card.appendChild(el(`<h2 class="font-display text-xl mb-4">Primary Goal</h2>`));
+    card.appendChild(el(`<h2 class="font-display text-xl mb-2">Goals</h2>`));
+    card.appendChild(el(`<p class="text-sm text-[var(--ink-2)] mb-4">Pick as many as apply — your training and nutrition targets blend across everything you select.</p>`));
     const grid = el(`<div class="space-y-2"></div>`);
     GOALS.forEach(g=>{
-      const active = p.goal===g.key;
+      const active = (p.goals||[]).includes(g.key);
       const opt = el(`
-        <button class="w-full text-left p-4 rounded-lg border ${active?'border-[var(--chalk)] bg-[var(--bg-2)]':'border-[var(--line)]'} transition">
-          <div class="font-display font-semibold ${active?'text-[var(--chalk)]':''}">${g.label}</div>
-          <div class="text-sm text-[var(--ink-2)] mt-1">${g.desc}</div>
+        <button class="w-full text-left p-4 rounded-lg border ${active?'border-[var(--chalk)] bg-[var(--bg-2)]':'border-[var(--line)]'} transition flex items-start gap-3">
+          <div class="mt-0.5 w-5 h-5 rounded shrink-0 flex items-center justify-center border ${active?'bg-[var(--chalk)] border-[var(--chalk)]':'border-[var(--line)]'}">${active?'<span style="color:var(--chalk-text); font-size:13px; font-weight:700; line-height:1;">✓</span>':''}</div>
+          <div>
+            <div class="font-display font-semibold ${active?'text-[var(--chalk)]':''}">${g.label}</div>
+            <div class="text-sm text-[var(--ink-2)] mt-1">${g.desc}</div>
+          </div>
         </button>`);
-      opt.onclick = ()=>{ p.goal=g.key; render(); };
+      opt.onclick = ()=>{
+        if(!Array.isArray(p.goals)) p.goals=[];
+        if(p.goals.includes(g.key)) p.goals = p.goals.filter(k=>k!==g.key);
+        else p.goals.push(g.key);
+        p.goal = p.goals[0] || ''; // primary goal kept in sync for legacy single-goal logic
+        render();
+      };
       grid.appendChild(opt);
     });
     card.appendChild(grid);
@@ -1515,13 +1584,13 @@ function handleOnboardNext(){
 function renderDashboard(){
   const wrap = el(`<div></div>`);
   const t = state.targets;
-  const calKey = goalToCalorieKey(state.profile.goal);
+  const calKey = profileCalorieKey(state.profile);
   const active = t[calKey];
 
   wrap.appendChild(el(`
     <div class="card p-5 mb-5">
       <div class="flex items-center justify-between mb-1">
-        <div class="label">Today's Target — ${goalScheme(state.profile.goal).label}</div>
+        <div class="label">Today's Target — ${goalsLabel(state.profile.goals) || (state.profile.goal ? goalScheme(state.profile.goal).label : '')}</div>
         <div class="font-mono text-xs text-[var(--ink-2)]">TDEE ${t.tdee} kcal</div>
       </div>
       <div class="font-display text-4xl font-bold text-[var(--chalk)]">${active.calories} <span class="text-lg text-[var(--ink-2)] font-normal">kcal / day</span></div>
@@ -2076,8 +2145,8 @@ function renderNutrition(){
    ['Maintenance', t.maintenance, 'For recomposition/strength/endurance — calories at TDEE, protein at 1.8g/kg.'],
    ['Bulking', t.bulking, `For muscle gain — ~${surplusPct}% surplus above TDEE, protein at 1.8g/kg, higher carbs to fuel training.`]
   ].forEach(([label,m,desc])=>{
-    const c = el(`<div class="card p-4 ${goalToCalorieKey(state.profile.goal)===label.toLowerCase()?'border-[var(--chalk)]':''}"></div>`);
-    c.appendChild(el(`<div class="label mb-1">${label}${goalToCalorieKey(state.profile.goal)===label.toLowerCase()?' · YOUR TARGET':''}</div>`));
+    const c = el(`<div class="card p-4 ${profileCalorieKey(state.profile)===label.toLowerCase()?'border-[var(--chalk)]':''}"></div>`);
+    c.appendChild(el(`<div class="label mb-1">${label}${profileCalorieKey(state.profile)===label.toLowerCase()?' · YOUR TARGET':''}</div>`));
     c.appendChild(el(`<div class="font-display text-2xl font-bold mb-2">${m.calories} kcal</div>`));
     c.appendChild(el(`<div class="text-xs font-mono space-y-1 text-[var(--ink-1)]">
       <div>Protein: ${m.protein.g}g (${m.protein.pct}%)</div>
@@ -2143,7 +2212,7 @@ function renderTracker(){
   wrap.appendChild(el(`<h2 class="font-display text-2xl font-bold mb-1">Daily Tracker</h2>`));
   wrap.appendChild(el(`<p class="text-sm text-[var(--ink-2)] mb-6">Log today's food intake and see it stack against your macro targets.</p>`));
 
-  const t = state.targets[goalToCalorieKey(state.profile.goal)];
+  const t = state.targets[profileCalorieKey(state.profile)];
   const todayFood = state.logs.food[todayISO()] || [];
   const totals = todayFood.reduce((a,f)=>({cals:a.cals+f.cals, protein:a.protein+f.protein, carbs:a.carbs+f.carbs, fat:a.fat+f.fat}), {cals:0,protein:0,carbs:0,fat:0});
 
@@ -2863,7 +2932,7 @@ async function runBaselineAnalysis(){
 
     content.push({type:'text', text:`
 You are a supportive, evidence-based physique coach. The first set of photos is the client themselves; the second set is their stated goal physique (a different person they're using as a visual reference). Give an honest, kind, non-judgmental comparison for training-and-nutrition planning purposes only — never a clinical or diagnostic measurement, and never body-shaming.
-Client's stated goal: "${state.profile.goal}". Gender: ${state.profile.gender}.
+Client's stated goal(s): "${goalsLabel(state.profile.goals) || state.profile.goal}". Gender: ${state.profile.gender}.
 Respond ONLY with strict JSON, no markdown, in this exact shape:
 {
  "clientAppraisal":"2-3 sentences on the client's current frame, muscle development, approximate body fat range, and posture",
@@ -2920,7 +2989,7 @@ async function runCheckinAnalysis(checkin){
     addImg('New check-in — rear view:', checkin.rear);
 
     content.push({type:'text', text:`
-You are a supportive, evidence-based physique coach. The first set of photos is the client's original baseline; the second set is a new progress check-in of the same client. Client's stated goal: "${state.profile.goal}".
+You are a supportive, evidence-based physique coach. The first set of photos is the client's original baseline; the second set is a new progress check-in of the same client. Client's stated goal(s): "${goalsLabel(state.profile.goals) || state.profile.goal}".
 Give an honest, kind, non-judgmental read on whether visible physical change is apparent between the two sets — never a clinical measurement, never body-shaming.
 Respond ONLY with strict JSON, no markdown, in this exact shape:
 {
