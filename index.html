@@ -278,7 +278,7 @@ function freshClientState(){
     onboarded:false, step:0,
     profile:{
       name:'', gender:'', ageYears:'', ageMonths:'',
-      weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg', theme:'dark',
+      weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg', theme:getStoredTheme(),
       measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'},
       goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:'', sessionMins:'', trainingTime:'AM',
       equipment:'', equipmentNotes:'', dietaryRestrictions:'', dietaryLikes:'', dietaryDislikes:'',
@@ -483,6 +483,18 @@ const LIGHT_PALETTE = {'--bg-0':'#F7F6F2', '--bg-1':'#FFFFFF', '--bg-2':'#EFEDE7
 function currentTheme(){
   return THEMES[state.profile.gender] || THEMES.default;
 }
+// Before login there's no client profile loaded yet to store a theme
+// preference on, so the gate screen remembers its own choice via
+// localStorage — safe here since this app runs as a real deployed website,
+// not inside a sandboxed preview. Once a client logs in, their own
+// profile.theme takes over (set elsewhere) and this is just the fallback.
+function getStoredTheme(){
+  try{ return localStorage.getItem('ironlog-theme') || 'dark'; }catch(e){ return 'dark'; }
+}
+function setStoredTheme(val){
+  try{ localStorage.setItem('ironlog-theme', val); }catch(e){ /* storage unavailable, ignore */ }
+}
+let preLoginTheme = getStoredTheme();
 function applyTheme(){
   const t = currentTheme();
   const s = document.documentElement.style;
@@ -491,7 +503,8 @@ function applyTheme(){
   s.setProperty('--chalk-light', t.chalkLight);
   s.setProperty('--chalk-text', t.chalkText);
   s.setProperty('--chalk-hover', t.chalkHover);
-  const palette = (state.profile && state.profile.theme==='light') ? LIGHT_PALETTE : DARK_PALETTE;
+  const effectiveTheme = (session.role && state.profile && state.profile.theme) ? state.profile.theme : preLoginTheme;
+  const palette = effectiveTheme==='light' ? LIGHT_PALETTE : DARK_PALETTE;
   Object.entries(palette).forEach(([k,v])=> s.setProperty(k, v));
 }
 function resizeImageFile(file, maxDim=640){
@@ -954,6 +967,13 @@ function setView(v){ state.view=v; notificationsOpen=false; render(); window.scr
 /* ============================= GATE / SESSION ============================= */
 function renderGate(){
   const wrap = el(`<div class="pt-16 sm:pt-20 max-w-sm mx-auto text-center"></div>`);
+  const gateThemeToggle = el(`<div class="flex justify-center gap-1 mb-6"></div>`);
+  [['dark','🌙 Dark'],['light','☀️ Light']].forEach(([val,label])=>{
+    const b = el(`<button class="px-4 py-1.5 rounded text-xs ${preLoginTheme===val?'btn-chalk':'btn-ghost'}">${label}</button>`);
+    b.onclick = ()=>{ preLoginTheme=val; setStoredTheme(val); applyTheme(); render(); };
+    gateThemeToggle.appendChild(b);
+  });
+  wrap.appendChild(gateThemeToggle);
   wrap.appendChild(el(`<img src="${LOGO_IMG_DATA_URI}" alt="Iron Log" class="mx-auto mb-3" style="max-width:220px; width:60%; height:auto; filter: drop-shadow(0 4px 16px rgba(0,0,0,0.6));">`));
   wrap.appendChild(el(`<div class="font-mono text-[11px] tracking-[0.15em] text-[var(--alert)] mb-10" style="text-transform:uppercase;">Training &amp; Nutrition System</div>`));
   wrap.appendChild(el(`<h1 class="font-display text-3xl font-bold mb-2">Enter Your Code</h1>`));
@@ -1394,6 +1414,7 @@ function renderHeader(){
   wrap.querySelector('#notifBellSlot').replaceWith(renderNotificationBell());
   wrap.querySelector('#themeToggleBtn').onclick = ()=>{
     state.profile.theme = state.profile.theme==='light' ? 'dark' : 'light';
+    preLoginTheme = state.profile.theme; setStoredTheme(state.profile.theme);
     applyTheme(); queueSave(); render();
   };
   wrap.querySelector('#resetBtn').onclick = resetAllData;
@@ -1548,7 +1569,7 @@ function renderOnboarding(){
     const themeToggle = el(`<div class="flex gap-1"></div>`);
     [['dark','Dark'],['light','Light']].forEach(([val,label])=>{
       const b = el(`<button class="px-4 py-1.5 rounded text-xs ${(p.theme||'dark')===val?'btn-chalk':'btn-ghost'}">${label}</button>`);
-      b.onclick = ()=>{ p.theme=val; applyTheme(); render(); };
+      b.onclick = ()=>{ p.theme=val; preLoginTheme=val; setStoredTheme(val); applyTheme(); render(); };
       themeToggle.appendChild(b);
     });
     themeRow.appendChild(themeToggle);
