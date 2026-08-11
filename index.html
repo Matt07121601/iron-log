@@ -974,7 +974,11 @@ function renderGate(){
     gateThemeToggle.appendChild(b);
   });
   wrap.appendChild(gateThemeToggle);
-  wrap.appendChild(el(`<img src="${LOGO_IMG_DATA_URI}" alt="Iron Log" class="mx-auto mb-3" style="max-width:220px; width:60%; height:auto; filter: drop-shadow(0 4px 16px rgba(0,0,0,0.6));">`));
+  wrap.appendChild(el(`
+    <div class="mx-auto mb-3" style="max-width:260px; padding:22px 18px; border-radius:24px; background:radial-gradient(ellipse at 50% 35%, #26262a, #16161a 75%); box-shadow:0 8px 28px rgba(0,0,0,0.35);">
+      <img src="${LOGO_IMG_DATA_URI}" alt="Iron Log" style="width:100%; height:auto; display:block; filter: drop-shadow(0 4px 12px rgba(0,0,0,0.5));">
+    </div>
+  `));
   wrap.appendChild(el(`<div class="font-mono text-[11px] tracking-[0.15em] text-[var(--alert)] mb-10" style="text-transform:uppercase;">Training &amp; Nutrition System</div>`));
   wrap.appendChild(el(`<h1 class="font-display text-3xl font-bold mb-2">Enter Your Code</h1>`));
   wrap.appendChild(el(`<p class="text-sm text-[var(--ink-2)] mb-6">Coaches use their coach code. Clients use the code their coach gave them.</p>`));
