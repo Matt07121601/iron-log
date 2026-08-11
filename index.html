@@ -2453,115 +2453,298 @@ function mealsPerDayForProfile(profile){
 // generated meal plan doesn't double up on protein.
 const PROTEIN_SHAKE_MACROS = {cals:120, protein:25, carbs:2, fat:2};
 
-async function generateMealPlan(){
-  state.mealPlan.status = 'loading'; render();
-  try{
-    const p = state.profile;
-    const calKey = profileCalorieKey(p);
-    const targets = state.targets[calKey];
-    const mealsPerDay = mealsPerDayForProfile(p);
-    const usesShake = !!p.usesProteinShake;
-    const foodTargets = usesShake ? {
-      calories: targets.calories - PROTEIN_SHAKE_MACROS.cals,
-      protein: Math.max(0, targets.protein.g - PROTEIN_SHAKE_MACROS.protein),
-      carbs: Math.max(0, targets.carbs.g - PROTEIN_SHAKE_MACROS.carbs),
-      fat: Math.max(0, targets.fat.g - PROTEIN_SHAKE_MACROS.fat)
-    } : {calories: targets.calories, protein: targets.protein.g, carbs: targets.carbs.g, fat: targets.fat.g};
+/* ============================= LOCAL MEAL PLAN ENGINE (no AI, no network) ============================= */
+// A curated library of UK-supermarket meals. Each template names a protein
+// source and (usually) a carb source by name — matched against COMMON_FOODS
+// above for real per-100g macro data — plus small fixed extras (veg/oil) that
+// aren't scaled. Tags are used to filter out anything matching the client's
+// allergies/dislikes, the same way the existing meal-building-blocks feature
+// already does.
+const MEAL_TEMPLATES = [
+  // Breakfasts
+  {id:'b1', slot:'Breakfast', name:'Porridge with Greek Yoghurt & Berries',
+    proteinSource:'Greek yoghurt, plain 0%', carbSource:'Oats, dry',
+    fixedExtras:[{food:'Mixed berries', grams:50},{food:'Honey', grams:10}],
+    tags:['dairy'], prepNote:'Cook oats in batches and refrigerate; add yoghurt fresh each morning.'},
+  {id:'b2', slot:'Breakfast', name:'Scrambled Eggs on Wholemeal Toast',
+    proteinSource:'Egg, whole, boiled', carbSource:'Wholemeal bread',
+    fixedExtras:[{food:'Butter', grams:5}],
+    tags:['egg','gluten','dairy'], prepNote:'Best cooked fresh, but eggs can be boiled in batches for the week and reheated or eaten cold.'},
+  {id:'b3', slot:'Breakfast', name:'Greek Yoghurt with Granola & Banana',
+    proteinSource:'Greek yoghurt, plain 0%', carbSource:'Granola',
+    fixedExtras:[{food:'Banana', grams:100}],
+    tags:['dairy'], prepNote:'Portion granola into containers for the week; assemble fresh each morning.'},
+  {id:'b4', slot:'Breakfast', name:'Cottage Cheese on Toast with Banana',
+    proteinSource:'Cottage cheese, low fat', carbSource:'Wholemeal bread',
+    fixedExtras:[{food:'Banana', grams:80}],
+    tags:['dairy','gluten'], prepNote:'Keeps well — cottage cheese lasts several days refrigerated.'},
+  // Lunches
+  {id:'l1', slot:'Lunch', name:'Chicken, Rice & Broccoli Bowl',
+    proteinSource:'Chicken breast, cooked', carbSource:'Rice, cooked, white',
+    fixedExtras:[{food:'Broccoli', grams:80},{food:'Olive oil', grams:5}],
+    tags:[], prepNote:'Batch cook chicken and rice on Sunday and Wednesday; keeps 3-4 days refrigerated.'},
+  {id:'l2', slot:'Lunch', name:'Tuna, Potato & Spinach Salad',
+    proteinSource:'Tuna, canned in water', carbSource:'Potato, boiled',
+    fixedExtras:[{food:'Spinach', grams:40},{food:'Olive oil', grams:8}],
+    tags:['fish'], prepNote:'Boil potatoes in bulk and refrigerate; assemble with tinned tuna fresh.'},
+  {id:'l3', slot:'Lunch', name:'Turkey Mince Pasta',
+    proteinSource:'Turkey mince, breast', carbSource:'Pasta, cooked',
+    fixedExtras:[{food:'Peppers', grams:60},{food:'Olive oil', grams:5}],
+    tags:[], prepNote:'Cook a large batch of the mince and pasta together; freezes well in portions.'},
+  {id:'l4', slot:'Lunch', name:'Chickpea & Couscous Bowl',
+    proteinSource:'Chickpeas, cooked', carbSource:'Couscous, cooked',
+    fixedExtras:[{food:'Spinach', grams:40},{food:'Olive oil', grams:8}],
+    tags:['vegetarian'], prepNote:'Fully plant-based option; keeps 3-4 days refrigerated.'},
+  // Dinners
+  {id:'d1', slot:'Dinner', name:'Salmon, Sweet Potato & Green Beans',
+    proteinSource:'Salmon, cooked', carbSource:'Sweet potato, cooked',
+    fixedExtras:[{food:'Green beans', grams:80}],
+    tags:['fish'], prepNote:'Roast sweet potato in bulk; salmon is quickest cooked fresh each time.'},
+  {id:'d2', slot:'Dinner', name:'Lean Beef Mince with Rice & Peppers',
+    proteinSource:'Lean beef mince 5%', carbSource:'Rice, cooked, white',
+    fixedExtras:[{food:'Peppers', grams:70},{food:'Olive oil', grams:5}],
+    tags:[], prepNote:'Cooks and reheats well — make a large batch and portion into containers.'},
+  {id:'d3', slot:'Dinner', name:'Chicken Thigh with New Potatoes & Green Beans',
+    proteinSource:'Chicken thigh, cooked', carbSource:'Potato, boiled',
+    fixedExtras:[{food:'Green beans', grams:70}],
+    tags:[], prepNote:'Batch roast chicken thighs and potatoes together on prep day.'},
+  {id:'d4', slot:'Dinner', name:'Tofu Noodle Stir-Fry',
+    proteinSource:'Tofu, firm', carbSource:'Noodles, cooked',
+    fixedExtras:[{food:'Peppers', grams:60},{food:'Broccoli', grams:60},{food:'Olive oil', grams:8}],
+    tags:['vegetarian','soy'], prepNote:'Fully plant-based option; stir-fry fresh for best texture, veg can be pre-chopped in advance.'},
+  // Snacks
+  {id:'s1', slot:'Snack', name:'Greek Yoghurt & Almonds',
+    proteinSource:'Greek yoghurt, plain 0%', carbSource:null,
+    fixedExtras:[{food:'Almonds', grams:15}],
+    tags:['dairy','nuts'], prepNote:'Portion almonds into small bags for grab-and-go.'},
+  {id:'s2', slot:'Snack', name:'Cottage Cheese & Rice Cakes',
+    proteinSource:'Cottage cheese, low fat', carbSource:'Rice cakes',
+    fixedExtras:[],
+    tags:['dairy'], prepNote:'Keeps well in the fridge for several days.'},
+  {id:'s3', slot:'Snack', name:'Apple with Peanut Butter',
+    proteinSource:null, carbSource:'Apple',
+    fixedExtras:[{food:'Peanut butter', grams:20}],
+    tags:['nuts'], prepNote:'No prep needed — a genuinely grab-and-go option.'},
+  {id:'s4', slot:'Snack', name:'Boiled Eggs',
+    proteinSource:'Egg, whole, boiled', carbSource:null,
+    fixedExtras:[],
+    tags:['egg'], prepNote:'Boil a batch of 6-8 eggs at the start of the week.'},
+  {id:'s5', slot:'Snack', name:'Whey Protein Shake',
+    proteinSource:'Whey protein powder', carbSource:null,
+    fixedExtras:[{food:'Milk, semi-skimmed', grams:200}],
+    tags:['dairy'], prepNote:'Mix fresh — no prep needed.', isShake:true}
+];
+// Which slots are used for a given number of daily meals, in order. Fewer
+// meals drop snacks first, keeping breakfast/lunch/dinner wherever the
+// eating window realistically allows them.
+const SLOT_PLANS = {
+  2: ['Lunch','Dinner'],
+  3: ['Breakfast','Lunch','Dinner'],
+  4: ['Breakfast','Lunch','Dinner','Snack'],
+  5: ['Breakfast','Lunch','Snack','Dinner','Snack'],
+  6: ['Breakfast','Snack','Lunch','Snack','Dinner','Snack']
+};
+const DAY_NAMES = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
 
-    const ifInfo = (p.intermittentFasting && p.intermittentFasting.enabled)
-      ? `The client follows a ${p.intermittentFasting.protocol} intermittent fasting protocol (${p.intermittentFasting.protocol.split(':')[0]}-hour fast, ${p.intermittentFasting.protocol.split(':')[1]}-hour eating window). All meals must fall within a realistic eating window for this protocol, timed appropriately around their training.`
-      : 'The client is not intermittent fasting — meals can be spread across a normal waking day.';
-
-    // Meal templates are defined ONCE and days just reference them by id — this
-    // keeps the response a fraction of the size of repeating every meal's full
-    // ingredients/macros seven times over, which was large enough to risk the
-    // response being cut off before valid JSON could complete.
-    const prompt = `You are a sports dietitian creating a practical 7-day meal plan for a client, grounded in current sports nutrition and exercise science evidence.
-
-CLIENT CONTEXT:
-- Gender: ${p.gender||'unspecified'}, Age: ${p.ageYears||'unspecified'}
-- Goal(s): ${goalsLabel(p.goals) || p.goal || 'general fitness'}
-- Trains: ${p.trainingTime||'AM'} (${p.daysPerWeek||'several'} days/week)
-- Daily targets to hit as closely as possible: ${Math.round(foodTargets.calories)} kcal, ${Math.round(foodTargets.protein)}g protein, ${Math.round(foodTargets.carbs)}g carbs, ${Math.round(foodTargets.fat)}g fat${usesShake ? ' (this EXCLUDES one whey protein shake of ~25g protein/120kcal the client already has separately — do not include a shake as a meal, food targets above already account for it)' : ''}
-- Cannot eat (allergies/intolerances): ${p.dietaryRestrictions || 'none specified'}
-- Dislikes (avoid): ${p.dietaryDislikes || 'none specified'}
-- Likes (use where sensible): ${p.dietaryLikes || 'none specified'}
-- ${ifInfo}
-- Use exactly ${mealsPerDay} eating occasions per day, chosen from this slot order and never exceeding it: Breakfast, Snack, Lunch, Snack, Dinner, Snack. Drop snacks first if fewer than 6 are needed; always keep whichever of breakfast/lunch/dinner remain realistic for the eating window.
-- Distribute carbohydrates and timing sensibly around the ${p.trainingTime||'AM'} training session (e.g. more carbs pre/post-training), per standard sports nutrition practice.
-
-REQUIREMENTS:
-- All ingredients must be realistically available in major UK supermarkets (Tesco, Sainsbury's, Aldi, Lidl, Asda, Morrisons) — no US-only or specialty items.
-- Every ingredient needs an amount in grams AND must specify "raw" or "cooked" weight.
-- IMPORTANT — keep the response compact: define only 2-3 meal OPTIONS per slot (e.g. 2-3 breakfasts, 2-3 lunches, 2-3 dinners, 2-3 snacks total if used) as reusable "mealTemplates", each with a unique id. Then build the 7-day "weekSchedule" by having each day reference template ids for its slots — do NOT repeat full ingredient/macro data for every day. This is standard batch-prep practice, not a simplification of quality.
-- Include brief batch-prep guidance (how to cook and store in advance, how many days ingredients keep).
-- Include a full 7-day shopping list, aggregating total grams/units needed for the week (based on how often each template is actually used across the 7 days), with a realistic estimated UK supermarket cost in GBP per item and a total.
-- Include 2-4 evidence-informed supplement suggestions specifically appropriate for this client's gender, age, and goal(s) (e.g. creatine, vitamin D, omega-3, protein where relevant) — only well-evidenced supplements, no proprietary blends or unproven products, each with a one-sentence rationale.
-
-Respond ONLY with strict JSON, no markdown, no commentary before or after, in this EXACT shape:
-{
-  "mealsPerDay": ${mealsPerDay},
-  "eatingWindowNote": "1 sentence describing the daily eating window/timing approach used",
-  "mealTemplates": [
-    {"id":"b1","slot":"Breakfast","time":"7:00am","name":"...","ingredients":[{"item":"...","grams":000,"weightType":"raw or cooked"}],"macros":{"calories":000,"protein":00,"carbs":00,"fat":00},"prepNote":"1 short sentence"}
-  ],
-  "weekSchedule": [
-    {"day":"Monday","mealIds":["b1","l1","d1"]},
-    {"day":"Tuesday","mealIds":["b1","l2","d1"]},
-    {"day":"Wednesday","mealIds":["b2","l1","d2"]},
-    {"day":"Thursday","mealIds":["b1","l2","d1"]},
-    {"day":"Friday","mealIds":["b2","l1","d2"]},
-    {"day":"Saturday","mealIds":["b1","l2","d2"]},
-    {"day":"Sunday","mealIds":["b2","l1","d1"]}
-  ],
-  "batchPrepGuide":"2-4 sentences on how to prep this week's meals in advance",
-  "shoppingList":[{"item":"...","totalAmount":"e.g. 1.4kg or 12 units","estCostGBP":0.0}],
-  "totalEstimatedCostGBP":0.0,
-  "supplements":[{"name":"...","dose":"...","rationale":"1 sentence"}]
+function mealTemplateBlocked(tpl, restricted, disliked){
+  const nameLower = tpl.name.toLowerCase();
+  const ingredientNames = [tpl.proteinSource, tpl.carbSource, ...(tpl.fixedExtras||[]).map(e=>e.food)]
+    .filter(Boolean).map(n=>n.toLowerCase());
+  const allTerms = [...restricted, ...disliked];
+  return allTerms.some(term=>{
+    if(!term) return false;
+    return nameLower.includes(term) || tpl.tags.some(tag=>tag===term) || ingredientNames.some(n=>n.includes(term));
+  });
 }
-Every id used in weekSchedule.mealIds MUST exist in mealTemplates. Keep meal names and prep notes concise. Do not include any text outside the JSON object.`;
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({model:'claude-sonnet-4-6', max_tokens:8000, messages:[{role:'user', content:prompt}]})
-    });
-    if(!response.ok){
-      const errText = await response.text().catch(()=>'(no body)');
-      console.error('Meal plan API error, status', response.status, errText);
-      throw new Error('API returned status '+response.status);
+// Scales a meal template's protein/carb source grams to hit a target macro
+// allocation as closely as realistic, then returns the ACTUAL resulting
+// ingredients and macros (summed from real per-100g data) — close to target,
+// not forced to match exactly, which is honest given whole foods rarely land
+// on an exact number.
+function scaleMealTemplate(tpl, targetCals, targetProtein, targetCarbs){
+  const ingredients = [];
+  let runningProtein = 0, runningCarbs = 0, runningFat = 0, runningCals = 0;
+
+  (tpl.fixedExtras||[]).forEach(extra=>{
+    const food = foodByName(extra.food);
+    if(!food) return;
+    const m = scaleMacros(food.per100, extra.grams);
+    ingredients.push({item:extra.food, grams:Math.round(extra.grams), weightType:'cooked'});
+    runningCals+=m.cals; runningProtein+=m.protein; runningCarbs+=m.carbs; runningFat+=m.fat;
+  });
+  const fixedProtein = runningProtein, fixedCarbs = runningCarbs;
+
+  const proteinFood = tpl.proteinSource ? foodByName(tpl.proteinSource) : null;
+  const carbFood = tpl.carbSource ? foodByName(tpl.carbSource) : null;
+  const proteinPer100 = proteinFood ? (proteinFood.per100.protein||1) : 1;
+  const carbsPer100 = carbFood ? (carbFood.per100.carbs||1) : 1;
+  // Carb sources like oats carry meaningful protein of their own (~17g/100g) —
+  // solving protein and carbs as two independent passes without correcting for
+  // that caused a systematic protein overshoot. This does a first pass, then a
+  // second pass that accounts for the carb source's own protein contribution.
+  let proteinGrams = proteinFood ? Math.max(30, Math.min(400, ((targetProtein - fixedProtein) / proteinPer100) * 100)) : 0;
+  if(tpl.isShake) proteinGrams = 30; // one standard scoop, not scaled
+  let carbGrams = 0;
+  if(carbFood){
+    const proteinFromFirstPass = proteinFood ? scaleMacros(proteinFood.per100, proteinGrams).protein : 0;
+    carbGrams = Math.max(20, Math.min(500, ((targetCarbs - fixedCarbs - (proteinFood?scaleMacros(proteinFood.per100,proteinGrams).carbs:0)) / carbsPer100) * 100));
+    if(proteinFood && !tpl.isShake){
+      const carbSourceProtein = scaleMacros(carbFood.per100, carbGrams).protein;
+      proteinGrams = Math.max(30, Math.min(400, ((targetProtein - fixedProtein - carbSourceProtein) / proteinPer100) * 100));
     }
-    const data = await response.json();
-    if(data.stop_reason==='max_tokens'){
-      console.error('Meal plan response was cut off at max_tokens — response too long.');
-    }
-    const textBlock = (data.content||[]).find(b=>b.type==='text');
-    if(!textBlock){
-      console.error('No text block in API response:', JSON.stringify(data).slice(0,500));
-      throw new Error('No text content returned');
-    }
-    let clean = textBlock.text.replace(/```json|```/g,'').trim();
-    let parsed;
-    try{
-      parsed = JSON.parse(clean);
-    }catch(parseErr){
-      console.error('Meal plan JSON parse failed. Raw text was:', clean);
-      throw parseErr;
-    }
-    // Expand templates into each day's actual meals for easy rendering, so the
-    // display code doesn't need to know about the template/schedule split.
-    const templateMap = {};
-    (parsed.mealTemplates||[]).forEach(t=> templateMap[t.id]=t);
-    const days = (parsed.weekSchedule||[]).map(dayEntry=>({
-      day: dayEntry.day,
-      meals: (dayEntry.mealIds||[]).map(id=>templateMap[id]).filter(Boolean)
-    }));
-    parsed.days = days;
-    state.mealPlan = {status:'done', result:parsed, generatedAt:todayISO()};
-  }catch(e){
-    console.error('Meal plan generation failed:', e);
-    state.mealPlan = {status:'error', result:null, generatedAt:null};
   }
-  queueSave(); render();
+
+  if(proteinFood){
+    const m = scaleMacros(proteinFood.per100, proteinGrams);
+    const weightType = /cooked|boiled/i.test(tpl.proteinSource) ? 'cooked' : (/powder|yoghurt|cheese/i.test(tpl.proteinSource) ? 'as prepared' : 'raw');
+    ingredients.push({item:tpl.proteinSource, grams:Math.round(proteinGrams), weightType});
+    runningCals+=m.cals; runningProtein+=m.protein; runningCarbs+=m.carbs; runningFat+=m.fat;
+  }
+  if(carbFood){
+    const m = scaleMacros(carbFood.per100, carbGrams);
+    const weightType = /cooked|boiled|rice|pasta|couscous|noodles/i.test(tpl.carbSource) ? 'cooked' : 'raw';
+    ingredients.push({item:tpl.carbSource, grams:Math.round(carbGrams), weightType});
+    runningCals+=m.cals; runningProtein+=m.protein; runningCarbs+=m.carbs; runningFat+=m.fat;
+  }
+
+  return {
+    slot: tpl.slot, name: tpl.name, id: tpl.id, prepNote: tpl.prepNote,
+    ingredients,
+    macros:{calories:Math.round(runningCals), protein:fmt1(runningProtein), carbs:fmt1(runningCarbs), fat:fmt1(runningFat)}
+  };
+}
+
+// Rule-based, evidence-informed supplement suggestions — no AI needed, since
+// these recommendations follow well-established, stable guidance rather than
+// anything requiring generative reasoning.
+function recommendSupplementsLocal(profile){
+  const goalsList = (Array.isArray(profile.goals) && profile.goals.length) ? profile.goals : (profile.goal ? [profile.goal] : []);
+  const recs = [];
+  if(goalsList.includes('strength') || goalsList.includes('muscle') || goalsList.includes('recomp')){
+    recs.push({name:'Creatine monohydrate', dose:'3-5g daily, any time', rationale:'The most consistently evidence-backed supplement for strength and muscle gain, safe for long-term daily use.'});
+  }
+  recs.push({name:'Vitamin D3', dose:'400-1000 IU daily, especially autumn-winter', rationale:'UK sunlight exposure is often insufficient to maintain healthy levels year-round, per Public Health England guidance for the general population.'});
+  recs.push({name:'Omega-3 (fish oil or algae-based)', dose:'1-2g combined EPA/DHA daily', rationale:'Supports cardiovascular and joint health, useful if oily fish is eaten less than twice a week.'});
+  if(!profile.usesProteinShake){
+    recs.push({name:'Whey or plant protein powder', dose:'As needed to close any gap to your daily protein target', rationale:'A practical way to hit protein targets if whole food alone falls short, not required if food already covers it.'});
+  }
+  return recs.slice(0,4);
+}
+
+function generateMealPlan(){
+  state.mealPlan.status = 'loading'; render();
+  // Computation is instant, but a brief timeout keeps the loading state
+  // visible long enough to feel intentional rather than a flicker.
+  setTimeout(()=>{
+    try{
+      const p = state.profile;
+      const calKey = profileCalorieKey(p);
+      const targets = state.targets[calKey];
+      const mealsPerDay = mealsPerDayForProfile(p);
+      const usesShake = !!p.usesProteinShake;
+      const restricted = (p.dietaryRestrictions||'').toLowerCase().split(',').map(s=>s.trim()).filter(Boolean);
+      const disliked = (p.dietaryDislikes||'').toLowerCase().split(',').map(s=>s.trim()).filter(Boolean);
+
+      const slots = SLOT_PLANS[mealsPerDay] || SLOT_PLANS[4];
+      const byType = {};
+      MEAL_TEMPLATES.forEach(t=>{
+        if(t.isShake) return; // handled separately below, not part of the normal rotation
+        if(mealTemplateBlocked(t, restricted, disliked)) return;
+        (byType[t.slot] = byType[t.slot]||[]).push(t);
+      });
+
+      // If the client uses a shake, it fills exactly one snack slot per day with
+      // its real fixed content (one scoop + milk) — not scaled to a target share,
+      // since scaling a shake up/down to hit an arbitrary fraction isn't realistic.
+      // Its actual macros are subtracted from the day's remaining budget up front,
+      // so the OTHER meals share what's left rather than everything competing for
+      // the same full-size targets and systematically overshooting.
+      let shakeMeal = null;
+      if(usesShake){
+        const shakeTpl = MEAL_TEMPLATES.find(t=>t.isShake);
+        shakeMeal = scaleMealTemplate(shakeTpl, 0, 0, 0);
+        shakeMeal.slot = 'Snack'; shakeMeal.time = '';
+      }
+      const remainingCals = Math.max(0, targets.calories - (shakeMeal ? shakeMeal.macros.calories : 0));
+      const remainingProtein = Math.max(0, targets.protein.g - (shakeMeal ? shakeMeal.macros.protein : 0));
+      const remainingCarbs = Math.max(0, targets.carbs.g - (shakeMeal ? shakeMeal.macros.carbs : 0));
+
+      // Weight each remaining slot's share of the (post-shake) daily targets:
+      // mains get 3x a snack's share. The training-adjacent slot gets a modest
+      // carb boost, per standard sports nutrition practice of timing carbs
+      // around training. The slot the shake occupies is excluded from this
+      // weighting since it's already accounted for above.
+      const trainAdjacentSlot = p.trainingTime==='PM' ? 'Dinner' : (p.trainingTime==='Midday' ? 'Lunch' : 'Breakfast');
+      const shakeSlotIndex = usesShake ? slots.map((s,idx)=>({s,idx})).filter(x=>x.s==='Snack')[0]?.idx : -1;
+      const weights = slots.map((s,i)=> i===shakeSlotIndex ? 0 : (s==='Snack' ? 1 : 3));
+      const totalWeight = weights.reduce((a,b)=>a+b,0) || 1;
+
+      const days = [];
+      const usedGrams = {}; // ingredient name -> total grams across the week, for the shopping list
+      let snackOccurrence = 0;
+
+      for(let d=0; d<7; d++){
+        const meals = [];
+        snackOccurrence = 0;
+        slots.forEach((slotType, i)=>{
+          if(i===shakeSlotIndex && shakeMeal){
+            const thisShake = JSON.parse(JSON.stringify(shakeMeal));
+            meals.push(thisShake);
+            thisShake.ingredients.forEach(ing=>{ usedGrams[ing.item] = (usedGrams[ing.item]||0) + ing.grams; });
+            return;
+          }
+          let pool = byType[slotType] || [];
+          if(pool.length===0) return;
+          // Vary by both day AND which occurrence of this slot type within the
+          // day, so e.g. two snack slots on the same day don't pick the same meal.
+          const pickIndex = slotType==='Snack' ? (d + snackOccurrence) : d;
+          if(slotType==='Snack') snackOccurrence++;
+          const tpl = pool[pickIndex % pool.length];
+
+          const calShare = remainingCals * (weights[i]/totalWeight);
+          let carbShare = remainingCarbs * (weights[i]/totalWeight);
+          if(slotType===trainAdjacentSlot){ carbShare *= 1.2; }
+          const proteinShare = remainingProtein * (weights[i]/totalWeight);
+
+          const meal = scaleMealTemplate(tpl, calShare, proteinShare, carbShare);
+          meal.slot = slotType; meal.time = '';
+          meals.push(meal);
+          meal.ingredients.forEach(ing=>{
+            usedGrams[ing.item] = (usedGrams[ing.item]||0) + ing.grams;
+          });
+        });
+        days.push({day:DAY_NAMES[d], meals});
+      }
+
+      const shoppingList = Object.entries(usedGrams).map(([item, grams])=>{
+        const kg = grams/1000;
+        const pricePer100g = UK_PRICE_PER_100G[item] || 0.5;
+        const cost = (grams/100) * pricePer100g;
+        return {item, totalAmount: kg>=1 ? `${fmt1(kg)}kg` : `${Math.round(grams)}g`, estCostGBP: fmt1(cost)};
+      }).sort((a,b)=> a.item.localeCompare(b.item));
+      const totalEstimatedCostGBP = fmt1(shoppingList.reduce((s,i)=>s+i.estCostGBP,0));
+
+      const ifNote = (p.intermittentFasting && p.intermittentFasting.enabled)
+        ? `Meals are compressed to fit a ${p.intermittentFasting.protocol} eating window.`
+        : 'Meals are spread across a normal waking day.';
+
+      state.mealPlan = {
+        status:'done',
+        result:{
+          mealsPerDay, eatingWindowNote: ifNote, days,
+          batchPrepGuide:'Cook proteins and carbs in bulk 2x this week (e.g. Sunday and Wednesday) and refrigerate in portioned containers for up to 4 days; most cooked proteins and grains also freeze well for up to 3 months if you want to prep further ahead.',
+          shoppingList, totalEstimatedCostGBP,
+          supplements: recommendSupplementsLocal(p)
+        },
+        generatedAt: todayISO()
+      };
+    }catch(e){
+      console.error('Meal plan generation failed:', e);
+      state.mealPlan = {status:'error', result:null, generatedAt:null};
+    }
+    queueSave(); render();
+  }, 400);
 }
 
 function renderNutrition(){
@@ -2958,7 +3141,32 @@ const COMMON_FOODS = [
   {name:'Walnuts', per100:{cals:654, protein:15, carbs:14, fat:65}},
   {name:'Peanut butter', per100:{cals:588, protein:25, carbs:20, fat:50}},
   {name:'Honey', per100:{cals:304, protein:0.3, carbs:82, fat:0}},
+  {name:'Granola', per100:{cals:471, protein:10, carbs:64, fat:20}},
+  {name:'Green beans', per100:{cals:31, protein:1.8, carbs:7, fat:0.1}},
+  {name:'Peppers', per100:{cals:31, protein:1, carbs:6, fat:0.3}},
+  {name:'Rice cakes', per100:{cals:387, protein:8, carbs:81, fat:2.8}},
+  {name:'Noodles, cooked', per100:{cals:138, protein:4.5, carbs:25, fat:2.2}},
 ];
+// Rough UK supermarket price per 100g (or per unit for whole items), based on
+// typical budget-to-mid-range pricing (Aldi/Lidl/Tesco own-brand). These are
+// estimates for planning purposes, not live prices.
+const UK_PRICE_PER_100G = {
+  'Chicken breast, cooked':1.10, 'Chicken thigh, cooked':0.70, 'Salmon, cooked':2.40,
+  'Tuna, canned in water':0.90, 'White fish (cod), cooked':1.60, 'Prawns':1.80,
+  'Lean beef mince 5%':1.30, 'Turkey mince, breast':1.20, 'Egg, whole, boiled':0.35,
+  'Egg whites':0.45, 'Greek yoghurt, plain 0%':0.35, 'Cottage cheese, low fat':0.45,
+  'Tofu, firm':0.55, 'Whey protein powder':2.20, 'Cheddar cheese':1.00,
+  'Milk, semi-skimmed':0.11, 'Rice, cooked, white':0.15, 'Brown rice, cooked':0.18,
+  'Oats, dry':0.16, 'Sweet potato, cooked':0.20, 'Potato, boiled':0.13,
+  'Quinoa, cooked':0.45, 'Pasta, cooked':0.13, 'Couscous, cooked':0.25,
+  'Wholemeal bread':0.25, 'Lentils, cooked':0.20, 'Chickpeas, cooked':0.22,
+  'Black beans, cooked':0.25, 'Edamame':0.60, 'Banana':0.18, 'Apple':0.25,
+  'Mixed berries':0.90, 'Broccoli':0.30, 'Spinach':0.45, 'Avocado':0.70,
+  'Olive oil':0.90, 'Butter':0.85, 'Almonds':1.60, 'Walnuts':1.90,
+  'Peanut butter':0.65, 'Honey':0.75, 'Granola':0.60, 'Green beans':0.45,
+  'Peppers':0.50, 'Rice cakes':0.35, 'Noodles, cooked':0.20
+};
+function foodByName(name){ return COMMON_FOODS.find(f=>f.name===name); }
 
 function scaleMacros(per100, qty){
   const f = (qty||0)/100;
