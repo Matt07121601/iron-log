@@ -2092,7 +2092,7 @@ function renderTrainingCalendar(){
       cell.title = `${entry.dayName} — ${CAL_STATUS_LABEL[entry.status]}`;
       cell.onclick = ()=>{
         const idx = state.program.findIndex(d=>d.name===entry.dayName);
-        if(idx>=0){ state.activeDayIndex=idx; showCalendar=false; calendarViewDate=null; render(); }
+        if(idx>=0){ state.activeDayIndex=idx; showCalendar=false; calendarViewDate=null; state.showingQuoteFor=idx; render(); }
       };
     }
     grid.appendChild(cell);
