@@ -2694,6 +2694,16 @@ function generateMealPlan(){
         return tt==='PM' ? 'Dinner' : (tt==='Midday' ? 'Lunch' : 'Breakfast');
       }
 
+      // Concrete clock times per training time, so the schedule actually looks
+      // and reads differently across AM/Midday/PM rather than only shifting
+      // macros invisibly. Keyed by slot + which occurrence (snacks can appear
+      // more than once per day).
+      const TIME_SCHEDULES = {
+        AM:     {Breakfast:'7:00am', Lunch:'12:30pm', Dinner:'7:00pm', Snack0:'10:00am', Snack1:'3:30pm', Snack2:'9:00pm'},
+        Midday: {Breakfast:'7:30am', Lunch:'1:00pm',  Dinner:'7:30pm', Snack0:'10:00am', Snack1:'4:00pm', Snack2:'9:00pm'},
+        PM:     {Breakfast:'8:00am', Lunch:'1:30pm',  Dinner:'8:00pm', Snack0:'11:00am', Snack1:'4:30pm', Snack2:'9:30pm'}
+      };
+
       const days = [];
       const usedGrams = {}; // ingredient name -> total grams across the week, for the shopping list
       let snackOccurrence = 0;
@@ -2704,12 +2714,17 @@ function generateMealPlan(){
         // per day) determines which meal gets the carb-timing boost that day —
         // a client training AM on Monday but PM on Tuesday gets genuinely
         // different meal structures on those two days, not one fixed pattern.
-        const trainAdjacentSlot = slotForTrainingTime(trainingTimeForDay(p, dayName));
+        const dayTrainingTime = trainingTimeForDay(p, dayName);
+        const trainAdjacentSlot = slotForTrainingTime(dayTrainingTime);
+        const schedule = TIME_SCHEDULES[dayTrainingTime] || TIME_SCHEDULES.AM;
         const meals = [];
         snackOccurrence = 0;
         slots.forEach((slotType, i)=>{
           if(i===shakeSlotIndex && shakeMeal){
             const thisShake = JSON.parse(JSON.stringify(shakeMeal));
+            thisShake.time = schedule['Snack'+snackOccurrence] || '';
+            thisShake.timingNote = dayTrainingTime==='AM' ? 'Post-workout' : '';
+            snackOccurrence++;
             meals.push(thisShake);
             thisShake.ingredients.forEach(ing=>{ usedGrams[ing.item] = (usedGrams[ing.item]||0) + ing.grams; });
             return;
@@ -2718,17 +2733,21 @@ function generateMealPlan(){
           if(pool.length===0) return;
           // Vary by both day AND which occurrence of this slot type within the
           // day, so e.g. two snack slots on the same day don't pick the same meal.
+          const occurrenceForTime = slotType==='Snack' ? snackOccurrence : 0;
           const pickIndex = slotType==='Snack' ? (d + snackOccurrence) : d;
           if(slotType==='Snack') snackOccurrence++;
           const tpl = pool[pickIndex % pool.length];
 
           const calShare = remainingCals * (weights[i]/totalWeight);
           let carbShare = remainingCarbs * (weights[i]/totalWeight);
-          if(slotType===trainAdjacentSlot){ carbShare *= 1.2; }
+          const isBoosted = slotType===trainAdjacentSlot;
+          if(isBoosted){ carbShare *= 1.2; }
           const proteinShare = remainingProtein * (weights[i]/totalWeight);
 
           const meal = scaleMealTemplate(tpl, calShare, proteinShare, carbShare);
-          meal.slot = slotType; meal.time = '';
+          meal.slot = slotType;
+          meal.time = slotType==='Snack' ? (schedule['Snack'+occurrenceForTime]||'') : (schedule[slotType]||'');
+          meal.timingNote = isBoosted ? `Training day (${dayTrainingTime}) — extra carbs here` : '';
           meals.push(meal);
           meal.ingredients.forEach(ing=>{
             usedGrams[ing.item] = (usedGrams[ing.item]||0) + ing.grams;
@@ -2948,6 +2967,9 @@ function renderMealPlanContent(result){
         mHead.appendChild(el(`<div class="text-xs font-mono text-[var(--ink-2)] text-right">${meal.macros.calories}kcal<br>P${meal.macros.protein} C${meal.macros.carbs} F${meal.macros.fat}</div>`));
       }
       card.appendChild(mHead);
+      if(meal.timingNote){
+        card.appendChild(el(`<div class="text-xs font-semibold mb-1" style="color:var(--chalk);">⚡ ${meal.timingNote}</div>`));
+      }
       if(meal.ingredients && meal.ingredients.length){
         const ingList = el(`<ul class="text-sm text-[var(--ink-1)] mt-2 space-y-0.5"></ul>`);
         meal.ingredients.forEach(ing=>{
