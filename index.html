@@ -1849,10 +1849,10 @@ function renderQuoteOverlay(){
   const q = nextQuote();
   const overlay = el(`
     <div id="quoteOverlay" class="quote-overlay">
-      <div class="max-w-lg text-center px-8">
-        <div class="label mb-4">Day ${state.showingQuoteFor+1} · ${state.program[state.showingQuoteFor].name}</div>
-        <div class="font-display text-3xl sm:text-4xl font-bold leading-snug">"${q}"</div>
-        <button id="skipQuoteBtn" class="btn btn-ghost mt-8 px-5 py-2 rounded-lg">Skip →</button>
+      <div class="max-w-lg text-center px-8" style="color:#F3F2EC;">
+        <div class="font-display mb-4" style="text-transform:uppercase; letter-spacing:0.06em; font-size:11px; color:#B8B7B0;">Day ${state.showingQuoteFor+1} · ${state.program[state.showingQuoteFor].name}</div>
+        <div class="font-display text-3xl sm:text-4xl font-bold leading-snug" style="color:#F3F2EC;">"${q}"</div>
+        <button id="skipQuoteBtn" class="mt-8 px-5 py-2 rounded-lg" style="background:transparent; border:1px solid #38383C; color:#F3F2EC; font-family:'Oswald',sans-serif; text-transform:uppercase; letter-spacing:0.04em; font-weight:600;">Skip →</button>
       </div>
     </div>
   `);
