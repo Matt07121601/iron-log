@@ -315,6 +315,7 @@ async function loadClientState(id){
   normalizeClientPhotosAndAnalysis();
   normalizeProgramRestTimes();
   ensureProgramCardio();
+  ensureProgramTechniques();
   ensureProgramWarmupCooldown();
   ensureProgramStartDate();
   ensureGoalsArray();
@@ -428,6 +429,15 @@ function ensureProgramCardio(){
     day.warmup = generated.warmup;
     day.cooldown = generated.cooldown;
   });
+}
+// Existing clients' programs were built before technique assignment existed,
+// so exercises simply won't have a `technique` field yet — purely additive,
+// safe to backfill for everyone the same way warm-up/cool-down was.
+function ensureProgramTechniques(){
+  if(!Array.isArray(state.program)) return;
+  const alreadyAssigned = state.program.some(day=> (day.exercises||[]).some(ex=> ex.technique));
+  if(alreadyAssigned) return;
+  state.program.forEach(day=> assignTrainingTechniques(day.exercises, state.profile));
 }
 // Migrates any client saved before the baseline/target/check-in photo redesign
 // (old shape: photos:{front,side,rear,target}, analysis:{status,result}) into the
@@ -1085,6 +1095,7 @@ function buildProgram(p){
     }));
     return { name: day.name, exercises };
   });
+  programDays.forEach(day=> assignTrainingTechniques(day.exercises, p));
   applyCardioToProgram(programDays, p, bodyMods);
   return programDays.map(day => ({...day, ...buildSessionWarmupCooldown(day.exercises)}));
 }
@@ -1149,6 +1160,107 @@ function computeWarmupSets(exercise, workingWeightKg){
     ? [{pct:40, reps:'8-10'}, {pct:60, reps:'5'}, {pct:80, reps:'2-3'}]
     : [{pct:50, reps:'10-12'}];
   return scheme.map(s=> ({...s, weightKg: workingWeightKg ? roundToPlate(workingWeightKg * s.pct/100) : null}));
+}
+/* ============================= TRAINING TECHNIQUES ============================= */
+// Advanced intensity/structuring techniques, applied only where evidence and
+// common practice support them for a given training-experience level and
+// goal — not sprinkled on everything. Novices get straight sets only: the
+// added complexity of these techniques isn't well-evidenced to outperform
+// consistent straight-set progression during the early skill-building phase,
+// and simplicity aids adherence and technique consistency.
+function assignTrainingTechniques(exercises, profile){
+  exercises.forEach(ex=>{ ex.technique='straight'; delete ex.supersetGroup; });
+  const exp = profile.trainingExperience || 'intermediate';
+  if(exp==='novice') return exercises;
+
+  const goalsList = (Array.isArray(profile.goals) && profile.goals.length) ? profile.goals : (profile.goal ? [profile.goal] : []);
+  const wantsStrength = goalsList.includes('strength');
+  const wantsMuscle = goalsList.includes('muscle') || goalsList.includes('recomp');
+  const wantsFatloss = goalsList.includes('fatloss');
+
+  const compounds = exercises.filter(ex=> isCompoundExercise(ex.name) && ex.muscle!=='Conditioning');
+  const isolations = exercises.filter(ex=> !isCompoundExercise(ex.name) && ex.muscle!=='Conditioning');
+
+  // Reverse pyramid (heaviest set first, while freshest) on the day's primary
+  // compound — well suited to strength work, and to advanced trainees more
+  // generally who can handle near-maximal loads safely and consistently.
+  if((wantsStrength || exp==='advanced') && compounds.length){
+    compounds[0].technique = 'reverse_pyramid';
+  }
+  // Classic ascending pyramid on a secondary compound for hypertrophy focus.
+  if(wantsMuscle && compounds.length>1){
+    compounds[1].technique = 'pyramid';
+  }
+  // Supersets (or giant sets for advanced fat-loss, where higher work
+  // capacity and tolerance for fatigue is more likely) on isolation/accessory
+  // pairs — increases session density and metabolic stress, well suited to
+  // hypertrophy and fat-loss goals. Not applied to heavy compounds, which
+  // need full recovery between sets for safe, effective loading.
+  if((wantsMuscle || wantsFatloss) && isolations.length>=2){
+    const groupSize = (exp==='advanced' && wantsFatloss) ? 3 : 2;
+    for(let i=0; i+1<isolations.length; i+=groupSize){
+      const group = isolations.slice(i, i+groupSize);
+      if(group.length<2) break;
+      const groupId = 'sg'+i;
+      group.forEach(ex=>{ ex.technique = group.length>=3 ? 'giant_set' : 'superset'; ex.supersetGroup = groupId; });
+    }
+  }
+  // Drop set on the final isolation exercise for advanced hypertrophy-focused
+  // trainees — a plateau-breaking intensity technique best reserved for
+  // those with enough training history to push safely to near-failure.
+  if(exp==='advanced' && wantsMuscle && isolations.length){
+    const last = isolations[isolations.length-1];
+    if(!last.supersetGroup) last.technique = 'drop_set';
+  }
+
+  // Keep grouped (superset/giant-set) exercises adjacent in the array —
+  // tagging alone isn't enough, since a compound exercise sitting between two
+  // grouped isolation exercises would break the visual grouping on render.
+  const seen = new Set();
+  const reordered = [];
+  exercises.forEach(ex=>{
+    if(seen.has(ex)) return;
+    reordered.push(ex); seen.add(ex);
+    if(ex.supersetGroup){
+      exercises.forEach(other=>{
+        if(other!==ex && !seen.has(other) && other.supersetGroup===ex.supersetGroup){
+          reordered.push(other); seen.add(other);
+        }
+      });
+    }
+  });
+  exercises.length = 0;
+  exercises.push(...reordered);
+  return exercises;
+}
+const TECHNIQUE_LABELS = {
+  straight:'', reverse_pyramid:'Reverse Pyramid', pyramid:'Pyramid',
+  drop_set:'Drop Set', superset:'Superset', giant_set:'Giant Set'
+};
+// Set-by-set weight/rep guidance for a given technique, scaled from the
+// client's actual suggested working weight when they have logged history —
+// otherwise shown as percentages, filling in with real numbers automatically
+// once they've logged at least one session (same approach as warm-up sets).
+function computeTechniqueGuidance(ex, workingWeightKg){
+  const round = pct => workingWeightKg ? roundToPlate(workingWeightKg*pct/100) : null;
+  if(ex.technique==='reverse_pyramid'){
+    return [
+      {pct:100, weightKg:round(100), note:'Set 1 (heaviest — do this first while freshest)'},
+      {pct:90, weightKg:round(90), note:'Set 2 — a couple more reps than set 1'},
+      {pct:80, weightKg:round(80), note:'Set 3 — a couple more reps again'}
+    ];
+  }
+  if(ex.technique==='pyramid'){
+    return [
+      {pct:70, weightKg:round(70), note:'Set 1 (lightest — top of rep range)'},
+      {pct:85, weightKg:round(85), note:'Set 2 (middle of rep range)'},
+      {pct:100, weightKg:round(100), note:'Set 3 (heaviest — bottom of rep range)'}
+    ];
+  }
+  if(ex.technique==='drop_set'){
+    return [{pct:75, weightKg:round(75), note:'After your last working set, drop weight ~25% immediately (no rest) and continue to near-failure'}];
+  }
+  return [];
 }
 function suggestNextWeight(dayName, exerciseName, repRange){
   const entries = Object.values(state.logs.workouts)
@@ -2573,9 +2685,24 @@ function renderWorkoutView(){
   if(day.exercises.length===0){
     wrap.appendChild(el(`<div class="card p-4 text-sm text-[var(--ink-2)]">No exercises on this day yet.${isCoachEditor?' Use Edit Program above to add some.':''}</div>`));
   }
-  day.exercises.forEach(ex=>{
-    wrap.appendChild(renderExerciseCard(day, ex, sessionLog));
-  });
+  let i=0;
+  while(i<day.exercises.length){
+    const ex = day.exercises[i];
+    if(ex.supersetGroup){
+      const group = [];
+      let j=i;
+      while(j<day.exercises.length && day.exercises[j].supersetGroup===ex.supersetGroup){ group.push(day.exercises[j]); j++; }
+      const groupWrap = el(`<div class="rounded-xl p-2 mb-4" style="border:1.5px dashed var(--chalk-dim);"></div>`);
+      const label = TECHNIQUE_LABELS[ex.technique] || 'Superset';
+      groupWrap.appendChild(el(`<div class="text-xs font-display font-semibold px-2 pt-1 pb-2" style="color:var(--chalk);">🔗 ${label} — perform back-to-back with little to no rest between exercises, then rest before repeating</div>`));
+      group.forEach(gex=> groupWrap.appendChild(renderExerciseCard(day, gex, sessionLog, true)));
+      wrap.appendChild(groupWrap);
+      i = j;
+    } else {
+      wrap.appendChild(renderExerciseCard(day, ex, sessionLog));
+      i++;
+    }
+  }
 
   if(Array.isArray(day.cooldown) && day.cooldown.length){
     wrap.appendChild(renderProtocolCard('🧊 Cool-Down', day.cooldown, 'Static stretching is appropriate here, now that the muscles are warm and training is finished.'));
@@ -2593,7 +2720,7 @@ function renderProtocolCard(title, items, note){
   return card;
 }
 
-function renderExerciseCard(day, ex, sessionLog){
+function renderExerciseCard(day, ex, sessionLog, insideGroup){
   if(!sessionLog.exercises[ex.name]){
     sessionLog.exercises[ex.name] = Array.from({length:ex.sets}, ()=>({weight:'',reps:'',rpe:'',done:false}));
   }
@@ -2601,11 +2728,16 @@ function renderExerciseCard(day, ex, sessionLog){
   const unit = state.profile.weightUnit || 'kg';
   const suggestion = suggestNextWeight(day.name, ex.name, ex.repRange);
 
-  const card = el(`<div class="card p-4 sm:p-5 mb-4"></div>`);
+  const card = el(`<div class="card p-4 sm:p-5 ${insideGroup?'':'mb-4'}" style="${insideGroup?'margin-bottom:8px;':''}"></div>`);
   const head = el(`<div class="flex items-start justify-between mb-1"></div>`);
   const titleWrap = el(`<div></div>`);
+  const titleRow = el(`<div class="flex items-center gap-2"></div>`);
   const link = el(`<a href="${videoLink(ex.name)}" target="_blank" rel="noopener" class="font-display text-lg font-semibold hover:text-[var(--chalk)] underline decoration-[var(--chalk-dim)] decoration-2 underline-offset-4">${ex.name}</a>`);
-  titleWrap.appendChild(link);
+  titleRow.appendChild(link);
+  if(ex.technique && ex.technique!=='straight' && !ex.supersetGroup){
+    titleRow.appendChild(el(`<span class="text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full" style="background:var(--bg-2); color:var(--chalk); border:1px solid var(--chalk-dim);">${TECHNIQUE_LABELS[ex.technique]}</span>`));
+  }
+  titleWrap.appendChild(titleRow);
   titleWrap.appendChild(el(`<div class="text-xs text-[var(--ink-2)] mt-1">${ex.muscle} · ${ex.sets} sets × ${ex.repRange} reps · RIR ${ex.rir} · rest ${ex.restSec}s</div>`));
   head.appendChild(titleWrap);
   card.appendChild(head);
@@ -2632,6 +2764,22 @@ function renderExerciseCard(day, ex, sessionLog){
       wuCard.appendChild(el(`<div class="text-[10px] text-[var(--ink-2)] mt-1">Log a working set below first — exact warm-up weights will show up automatically after that.</div>`));
     }
     card.appendChild(wuCard);
+  }
+
+  const techniqueGuidance = computeTechniqueGuidance(ex, workingWeightKg);
+  if(techniqueGuidance.length){
+    const tCard = el(`<div class="mb-3 p-3 rounded-lg" style="background:var(--bg-2); border:1px solid var(--chalk-dim);"></div>`);
+    tCard.appendChild(el(`<div class="label mb-1.5" style="color:var(--chalk);">${TECHNIQUE_LABELS[ex.technique]} Guidance</div>`));
+    const tList = el(`<div class="text-xs font-mono text-[var(--ink-1)] space-y-0.5"></div>`);
+    techniqueGuidance.forEach(g=>{
+      const weightText = g.weightKg!=null ? `${toDisplayWeight(g.weightKg, unit)}${unit}` : `~${g.pct}% of working weight`;
+      tList.appendChild(el(`<div>${weightText} — ${g.note}</div>`));
+    });
+    tCard.appendChild(tList);
+    if(!workingWeightKg){
+      tCard.appendChild(el(`<div class="text-[10px] text-[var(--ink-2)] mt-1">Log a working set below first — exact weights will show up automatically after that.</div>`));
+    }
+    card.appendChild(tCard);
   }
 
   const table = el(`<div class="space-y-2"></div>`);
