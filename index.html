@@ -314,6 +314,7 @@ async function loadClientState(id){
   }catch(e){ /* new client, no data yet */ }
   normalizeClientPhotosAndAnalysis();
   normalizeProgramRestTimes();
+  ensureProgramCardio();
   ensureProgramWarmupCooldown();
   ensureProgramStartDate();
   ensureGoalsArray();
@@ -404,6 +405,28 @@ function ensureProgramWarmupCooldown(){
       day.warmup = generated.warmup;
       day.cooldown = generated.cooldown;
     }
+  });
+}
+// Existing clients either had no cardio at all, or (endomorph body type only)
+// a single generic conditioning finisher from an earlier, simpler version.
+// This upgrades everyone to the new tailored prescription — safe to run
+// unconditionally since cardio placement was never something coaches would
+// have manually fine-tuned via Edit Program.
+function ensureProgramCardio(){
+  if(!Array.isArray(state.program) || state.program.length===0) return;
+  const alreadyTailored = state.program.some(day=>
+    (day.exercises||[]).some(ex=> ex.muscle==='Conditioning' && /HIIT|LISS/.test(ex.name))
+  );
+  if(alreadyTailored) return;
+  state.program.forEach(day=>{
+    day.exercises = (day.exercises||[]).filter(ex=> ex.muscle!=='Conditioning');
+  });
+  const bodyMods = applyBodyTypeModifiers(state.profile.bodyType);
+  applyCardioToProgram(state.program, state.profile, bodyMods);
+  state.program.forEach(day=>{
+    const generated = buildSessionWarmupCooldown(day.exercises);
+    day.warmup = generated.warmup;
+    day.cooldown = generated.cooldown;
   });
 }
 // Migrates any client saved before the baseline/target/check-in photo redesign
@@ -941,6 +964,81 @@ function buildSessionWarmupCooldown(exercises){
   return {warmup, cooldown};
 }
 
+/* ============================= CARDIOVASCULAR TRAINING ============================= */
+// Tailored cardio, scaled by goal(s), estimated current body fat, and the gap
+// to target physique (when available). Endurance and fat-loss-oriented goals
+// get meaningfully more; muscle/strength-only goals get a general-health
+// minimum, since research on concurrent training shows high-volume/frequency
+// cardio can measurably interfere with strength and hypertrophy gains
+// (the "interference effect" — e.g. Wilson et al. 2012 meta-analysis).
+// Sessions are distributed as finishers AFTER resistance work on a subset of
+// the client's existing training days, rather than consuming extra days
+// beyond what they said they have available — and placing cardio after
+// lifting (not before) minimizes any interference with that session's own
+// strength/power output.
+function computeCardioPrescription(profile, bodyMods){
+  const goalsList = (Array.isArray(profile.goals) && profile.goals.length) ? profile.goals : (profile.goal ? [profile.goal] : []);
+  let weeklyMinutes;
+  if(goalsList.includes('endurance')) weeklyMinutes = 200;
+  else if(goalsList.includes('fatloss')) weeklyMinutes = 120;
+  else if(goalsList.includes('recomp')) weeklyMinutes = 90;
+  else weeklyMinutes = 50; // muscle/strength-only: general-health minimum, minimizing interference
+
+  // Nudge based on the gap between estimated current and target body fat,
+  // when the client has provided (or the app can estimate) both.
+  const current = estimateBodyFatPct(profile);
+  const target = resolveTargetBodyFatPct(profile);
+  if(current && target){
+    const gap = current.value - target.value;
+    if(gap > 5) weeklyMinutes += 50;
+    else if(gap > 2.5) weeklyMinutes += 25;
+  }
+  if(bodyMods && bodyMods.conditioning) weeklyMinutes += 20; // endomorph: higher NEAT/cardio inclusion is low-risk
+
+  weeklyMinutes = Math.max(40, Math.min(240, Math.round(weeklyMinutes/5)*5));
+
+  let numSessions;
+  if(weeklyMinutes <= 60) numSessions = 1;
+  else if(weeklyMinutes <= 150) numSessions = 2;
+  else numSessions = 3;
+
+  const sessions = [];
+  if(numSessions===1){
+    // A single minimal dose is better as lower-fatigue steady-state — easier
+    // to recover from alongside a strength/muscle-focused lifting schedule.
+    sessions.push({type:'LISS', minutes: weeklyMinutes});
+  } else {
+    // One HIIT session (time-efficient, capped since it's the higher-fatigue
+    // option), with the rest as steady-state — and the HIIT cap's "leftover"
+    // minutes are redistributed to the LISS sessions so the delivered total
+    // still matches the intended weekly volume, not silently falling short.
+    const hiitMinutes = Math.min(25, Math.round((weeklyMinutes/numSessions)/5)*5);
+    const lissCount = numSessions - 1;
+    const perLiss = Math.round(((weeklyMinutes-hiitMinutes)/lissCount)/5)*5;
+    sessions.push({type:'HIIT', minutes:hiitMinutes});
+    for(let i=0;i<lissCount;i++){ sessions.push({type:'LISS', minutes:perLiss}); }
+  }
+  return {weeklyMinutes, sessions};
+}
+function buildCardioFinisher(session){
+  if(session.type==='HIIT'){
+    return {name:'Interval Training (HIIT) Finisher', muscle:'Conditioning', sets:1, repRange:`${session.minutes} min: 30s hard / 90s easy, repeat`, rir:'RPE 8-9 on hard efforts', restSec:60};
+  }
+  return {name:'Steady-State Cardio (LISS) Finisher', muscle:'Conditioning', sets:1, repRange:`${session.minutes} min steady`, rir:'RPE 5-6', restSec:60};
+}
+// Spreads cardio sessions evenly across the week's resistance days (rather
+// than bunching them on the first few), then attaches each as a finisher.
+function applyCardioToProgram(days, profile, bodyMods){
+  const cardio = computeCardioPrescription(profile, bodyMods);
+  if(!days.length || !cardio.sessions.length) return cardio;
+  const spacing = Math.max(1, Math.floor(days.length / cardio.sessions.length));
+  cardio.sessions.forEach((session, i)=>{
+    const dayIdx = Math.min(days.length-1, i*spacing);
+    days[dayIdx].exercises.push(buildCardioFinisher(session));
+  });
+  return cardio;
+}
+
 function buildProgram(p){
   const days = parseInt(p.daysPerWeek)||3;
   const lib = EX[p.equipment] || EX.gym;
@@ -964,7 +1062,7 @@ function buildProgram(p){
   else template = [{name:'Push A', pool:'push'},{name:'Pull A', pool:'pull'},{name:'Legs A', pool:'legs'},{name:'Push B', pool:'push'},{name:'Pull B', pool:'pull'},{name:'Legs B', pool:'legs'}].slice(0,days);
 
   const occurrence = {};
-  return template.map((day)=>{
+  const programDays = template.map((day)=>{
     let pool = [];
     if(Array.isArray(day.pool)){
       const lists = day.pool.map(k=> lib[k].slice());
@@ -985,16 +1083,10 @@ function buildProgram(p){
     const exercises = chosen.map(e=>({
       name:e.n, muscle:e.m, sets:scheme.sets, repRange:scheme.reps, rir:scheme.rir, restSec:restSecForExercise(e.n, goalsList, bodyMods)
     }));
-    // Endomorph modifier: add a conditioning finisher, since higher NEAT/cardio inclusion
-    // is a reasonable, low-risk addition regardless of resistance-training goal.
-    if(bodyMods.conditioning){
-      exercises.push({
-        name:'Conditioning Finisher (incline walk, bike, or rower)', muscle:'Conditioning',
-        sets:1, repRange:'10–15 min steady', rir:'RPE 5–6', restSec:60
-      });
-    }
-    return { name: day.name, exercises, ...buildSessionWarmupCooldown(exercises) };
+    return { name: day.name, exercises };
   });
+  applyCardioToProgram(programDays, p, bodyMods);
+  return programDays.map(day => ({...day, ...buildSessionWarmupCooldown(day.exercises)}));
 }
 
 /* ============================= MOTIVATIONAL QUOTES ============================= */
@@ -2390,9 +2482,26 @@ function renderWorkoutView(){
     if(bodyMods.volumeMult>1) notes.push('slightly increased set volume');
     if(bodyMods.restAddSec>0) notes.push('longer rest periods');
     if(bodyMods.restAddSec<0) notes.push('shorter rest periods');
-    if(bodyMods.conditioning) notes.push('a conditioning finisher on each day');
     if(notes.length){
       wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-4">Tailored for ${btLabel}: ${notes.join(', ')}, on top of your goal and equipment. Base rep ranges and exercise selection still come primarily from your stated goal.</p>`));
+    }
+  }
+  if(!workoutEditMode){
+    const cardioSessions = [];
+    state.program.forEach(d=> (d.exercises||[]).forEach(ex=>{
+      if(ex.muscle==='Conditioning') cardioSessions.push(ex);
+    }));
+    if(cardioSessions.length){
+      const totalMin = cardioSessions.reduce((s,ex)=>{
+        const m = /(\d+)/.exec(ex.repRange||'');
+        return s + (m ? parseInt(m[1]) : 0);
+      }, 0);
+      const hiitCount = cardioSessions.filter(ex=>/HIIT/.test(ex.name)).length;
+      const lissCount = cardioSessions.length - hiitCount;
+      const parts = [];
+      if(hiitCount) parts.push(`${hiitCount} HIIT`);
+      if(lissCount) parts.push(`${lissCount} steady-state`);
+      wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-4">Includes ~${totalMin} min/week of cardio (${parts.join(' + ')}), tailored to your goal and physique data — placed after lifting on the relevant days to minimize interference with strength.</p>`));
     }
   }
   if(!workoutEditMode && state.analysis.baseline.status==='done' && state.analysis.baseline.result && state.analysis.baseline.result.trainingFocus){
