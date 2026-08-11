@@ -314,6 +314,7 @@ async function loadClientState(id){
   }catch(e){ /* new client, no data yet */ }
   normalizeClientPhotosAndAnalysis();
   normalizeProgramRestTimes();
+  ensureProgramWarmupCooldown();
   ensureProgramStartDate();
   ensureGoalsArray();
   ensureTrainingExperience();
@@ -390,6 +391,19 @@ function normalizeProgramRestTimes(){
       if(ex.muscle === 'Conditioning') return; // leave the cardio finisher alone
       ex.restSec = restSecForExercise(ex.name, goalsList, bodyMods);
     });
+  });
+}
+// Existing clients' programs were built before warm-up/cool-down existed as a
+// feature, so their saved days simply won't have it — this is purely additive
+// (nothing to preserve/overwrite), so it's safe to backfill for everyone.
+function ensureProgramWarmupCooldown(){
+  if(!Array.isArray(state.program)) return;
+  state.program.forEach(day=>{
+    if(!Array.isArray(day.warmup) || !Array.isArray(day.cooldown)){
+      const generated = buildSessionWarmupCooldown(day.exercises);
+      day.warmup = generated.warmup;
+      day.cooldown = generated.cooldown;
+    }
   });
 }
 // Migrates any client saved before the baseline/target/check-in photo redesign
@@ -862,6 +876,71 @@ function blendedGoalScheme(goals){
     label: list.map(gl=>goalScheme(gl).label).join(' + ')
   };
 }
+/* ============================= WARM-UP / COOL-DOWN ============================= */
+// Dynamic movement prep before training, targeted to the muscles used that
+// session — dynamic (not static) stretching pre-workout is the evidence-based
+// choice, since static stretching immediately before resistance training can
+// transiently reduce force/power output (per ACSM/NSCA guidance).
+const WARMUP_MOVES_BY_MUSCLE = {
+  Chest: ['Arm circles (30s)', 'Push-up to downward dog x8'],
+  Shoulders: ['Arm circles (30s)', 'Band pull-aparts x15'],
+  Triceps: ['Arm circles (30s)', 'Overhead reach & bend x10'],
+  Back: ['Band pull-aparts x15', "Cat-cow x10"],
+  Lats: ['Scapular pull-ups x10', "Cat-cow x10"],
+  'Posterior Chain': ['Leg swings, front-to-back x10 each side', 'Glute bridges x15'],
+  Biceps: ['Arm circles (30s)', 'Light band curls x15'],
+  Traps: ['Shoulder rolls x15', 'Scapular shrugs x15'],
+  'Rear Delts': ['Band pull-aparts x15', 'Arm swings x15'],
+  Quads: ['Bodyweight squats x12', 'Walking lunges x10 each leg'],
+  Hamstrings: ['Leg swings, front-to-back x10 each side', 'Walking toe touches x10'],
+  Glutes: ['Glute bridges x15', 'Bodyweight squats x12'],
+  Calves: ['Ankle circles x10 each', 'Bodyweight calf raises x15'],
+  Core: ['Cat-cow x10', 'Bird dogs x8 each side'],
+  Legs: ['Bodyweight squats x12', 'Walking lunges x10 each leg', 'Leg swings x10 each side']
+};
+// Static stretching post-workout, held once the muscle is already warm and
+// training is finished — appropriate timing per the same guidance above.
+const COOLDOWN_STRETCHES_BY_MUSCLE = {
+  Chest: ['Doorway chest stretch — 20-30s each side'],
+  Shoulders: ['Cross-body shoulder stretch — 20-30s each side'],
+  Triceps: ['Overhead triceps stretch — 20-30s each side'],
+  Back: ["Child's pose — 30s"],
+  Lats: ['Overhead lat stretch — 20-30s each side'],
+  'Posterior Chain': ['Standing forward fold — 30s'],
+  Biceps: ['Wall bicep stretch — 20-30s each side'],
+  Traps: ['Neck side stretch — 20-30s each side'],
+  'Rear Delts': ['Cross-body shoulder stretch — 20-30s each side'],
+  Quads: ['Standing quad stretch — 20-30s each side'],
+  Hamstrings: ['Standing or seated hamstring stretch — 20-30s each side'],
+  Glutes: ['Figure-4 glute stretch — 20-30s each side'],
+  Calves: ['Wall calf stretch — 20-30s each side'],
+  Core: ['Cobra stretch — 30s'],
+  Legs: ['Standing quad stretch — 20-30s each side', 'Standing hamstring stretch — 20-30s each side']
+};
+// Builds a session's general warm-up and cool-down from whichever muscle
+// groups its exercises actually use, so a leg day and a push day get
+// genuinely different protocols rather than one generic routine.
+function buildSessionWarmupCooldown(exercises){
+  const muscles = [...new Set((exercises||[]).map(e=>e.muscle).filter(m=>m && m!=='Conditioning'))];
+  const warmupMoves = [];
+  muscles.forEach(m=>{
+    (WARMUP_MOVES_BY_MUSCLE[m]||[]).forEach(move=>{ if(!warmupMoves.includes(move)) warmupMoves.push(move); });
+  });
+  const cooldownMoves = [];
+  muscles.forEach(m=>{
+    (COOLDOWN_STRETCHES_BY_MUSCLE[m]||[]).forEach(move=>{ if(!cooldownMoves.includes(move)) cooldownMoves.push(move); });
+  });
+  const warmup = [
+    '5-10 min light cardio (bike, rower, or brisk walk) to raise core temperature',
+    ...warmupMoves.slice(0,5)
+  ];
+  const cooldown = [
+    '3-5 min easy walking or cycling to gradually lower heart rate',
+    ...cooldownMoves.slice(0,4)
+  ];
+  return {warmup, cooldown};
+}
+
 function buildProgram(p){
   const days = parseInt(p.daysPerWeek)||3;
   const lib = EX[p.equipment] || EX.gym;
@@ -914,7 +993,7 @@ function buildProgram(p){
         sets:1, repRange:'10–15 min steady', rir:'RPE 5–6', restSec:60
       });
     }
-    return { name: day.name, exercises };
+    return { name: day.name, exercises, ...buildSessionWarmupCooldown(exercises) };
   });
 }
 
@@ -955,6 +1034,29 @@ function parseRepRange(repRange){
   const single = /(\d+)/.exec(repRange||'');
   if(single) return {min:parseInt(single[1]), max:parseInt(single[1])};
   return {min:0, max:999};
+}
+// Rounds to a realistic loadable weight — plates aren't infinitely fine-grained.
+function roundToPlate(kg){
+  if(!kg || kg<=0) return 0;
+  const increment = kg<20 ? 1 : (kg<60 ? 2.5 : 5);
+  return Math.round(kg/increment)*increment;
+}
+// Warm-up sets ramp up toward the working weight before the working sets
+// begin — a widely-used, evidence-informed approach (NSCA/ACSM guidance) to
+// prepare the neuromuscular system and joints for heavier compound lifts in
+// particular. Isolation work carries less injury/fatigue risk so needs less
+// ramp-up. Uses the client's actual suggested working weight when they have
+// logged history for this exercise — otherwise gives percentage guidance
+// rather than fabricated numbers, and fills in real weights automatically
+// once they've logged at least one session.
+function computeWarmupSets(exercise, workingWeightKg){
+  if(exercise.muscle === 'Conditioning') return [];
+  if(/hold|plank|wall sit/i.test(exercise.name) || /min/i.test(exercise.repRange||'')) return [];
+  const compound = isCompoundExercise(exercise.name);
+  const scheme = compound
+    ? [{pct:40, reps:'8-10'}, {pct:60, reps:'5'}, {pct:80, reps:'2-3'}]
+    : [{pct:50, reps:'10-12'}];
+  return scheme.map(s=> ({...s, weightKg: workingWeightKg ? roundToPlate(workingWeightKg * s.pct/100) : null}));
 }
 function suggestNextWeight(dayName, exerciseName, repRange){
   const entries = Object.values(state.logs.workouts)
@@ -2345,6 +2447,10 @@ function renderWorkoutView(){
     doneSets += s.filter(x=>x.done).length;
   });
 
+  if(Array.isArray(day.warmup) && day.warmup.length){
+    wrap.appendChild(renderProtocolCard('🔥 Warm-Up', day.warmup, 'Do this before your first working set — dynamic movement, not static stretching, since static stretching right before lifting can temporarily reduce strength.'));
+  }
+
   // plate loader signature element
   const plateWrap = el(`<div class="flex items-center gap-2 mb-6"></div>`);
   const totalPlates = Math.min(totalSets, 12);
@@ -2362,7 +2468,20 @@ function renderWorkoutView(){
     wrap.appendChild(renderExerciseCard(day, ex, sessionLog));
   });
 
+  if(Array.isArray(day.cooldown) && day.cooldown.length){
+    wrap.appendChild(renderProtocolCard('🧊 Cool-Down', day.cooldown, 'Static stretching is appropriate here, now that the muscles are warm and training is finished.'));
+  }
+
   return wrap;
+}
+function renderProtocolCard(title, items, note){
+  const card = el(`<div class="card p-4 mb-4"></div>`);
+  card.appendChild(el(`<div class="font-display font-semibold mb-2">${title}</div>`));
+  const list = el(`<ul class="text-sm text-[var(--ink-1)] space-y-1 list-disc pl-4"></ul>`);
+  items.forEach(item=> list.appendChild(el(`<li>${item}</li>`)));
+  card.appendChild(list);
+  if(note) card.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mt-2">${note}</p>`));
+  return card;
 }
 
 function renderExerciseCard(day, ex, sessionLog){
@@ -2387,6 +2506,23 @@ function renderExerciseCard(day, ex, sessionLog){
     const lastDisplay = toDisplayWeight(suggestion.lastWeight, unit);
     card.appendChild(el(`<div class="text-xs font-mono text-[var(--ok)] mb-1">↑ Suggested: ${suggestedDisplay}${unit} (last: ${lastDisplay}${unit} × ${suggestion.lastReps} reps @ RPE ${suggestion.lastRpe})</div>`));
     card.appendChild(el(`<div class="text-xs text-[var(--ink-2)] mb-3">${suggestion.reason}</div>`));
+  }
+
+  const workingWeightKg = suggestion ? parseFloat(suggestion.suggested) : null;
+  const warmupSets = computeWarmupSets(ex, workingWeightKg);
+  if(warmupSets.length){
+    const wuCard = el(`<div class="mb-3 p-3 rounded-lg" style="background:var(--bg-2);"></div>`);
+    wuCard.appendChild(el(`<div class="label mb-1.5">Warm-Up Sets</div>`));
+    const wuList = el(`<div class="text-xs font-mono text-[var(--ink-1)] space-y-0.5"></div>`);
+    warmupSets.forEach((ws,i)=>{
+      const weightText = ws.weightKg!=null ? `${toDisplayWeight(ws.weightKg, unit)}${unit}` : `~${ws.pct}% of working weight`;
+      wuList.appendChild(el(`<div>Set ${i+1}: ${weightText} × ${ws.reps} reps</div>`));
+    });
+    wuCard.appendChild(wuList);
+    if(!workingWeightKg){
+      wuCard.appendChild(el(`<div class="text-[10px] text-[var(--ink-2)] mt-1">Log a working set below first — exact warm-up weights will show up automatically after that.</div>`));
+    }
+    card.appendChild(wuCard);
   }
 
   const table = el(`<div class="space-y-2"></div>`);
