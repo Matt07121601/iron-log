@@ -194,7 +194,7 @@ let state = {
     name:'', gender:'', ageYears:'', ageMonths:'',
     weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg', theme:'dark',
     measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'},
-    goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:4, sessionMins:60, trainingTime:'AM',
+    goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:'', sessionMins:'', trainingTime:'AM',
     equipment:'', equipmentNotes:'', dietaryRestrictions:'', dietaryLikes:'', dietaryDislikes:'',
     programStartDate:''
   },
@@ -280,7 +280,7 @@ function freshClientState(){
       name:'', gender:'', ageYears:'', ageMonths:'',
       weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg', theme:'dark',
       measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'},
-      goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:4, sessionMins:60, trainingTime:'AM',
+      goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:'', sessionMins:'', trainingTime:'AM',
       equipment:'', equipmentNotes:'', dietaryRestrictions:'', dietaryLikes:'', dietaryDislikes:'',
       programStartDate:''
     },
@@ -1563,16 +1563,22 @@ function renderOnboarding(){
   }
   else if(state.step===1){
     card.appendChild(el(`<h2 class="font-display text-xl mb-4">Body Stats</h2>`));
-    card.appendChild(field('Weight (kg) *', inputNum(p.weightKg, v=>{p.weightKg=v; render();})));
-    if(p.weightKg){
-      const st = kgToStone(parseFloat(p.weightKg));
-      card.appendChild(el(`<div class="text-xs font-mono text-[var(--ink-2)] -mt-3 mb-3">≈ ${st.st}st ${st.lb}lb</div>`));
-    }
+    const weightHint = el(`<div class="text-xs font-mono text-[var(--ink-2)] -mt-3 mb-3">${p.weightKg ? (()=>{const st=kgToStone(parseFloat(p.weightKg)); return `≈ ${st.st}st ${st.lb}lb`;})() : ''}</div>`);
+    const weightInput = inputNum(p.weightKg, v=>{
+      p.weightKg = v;
+      weightHint.textContent = v ? (()=>{const st=kgToStone(parseFloat(v)); return `≈ ${st.st}st ${st.lb}lb`;})() : '';
+    });
+    card.appendChild(field('Weight (kg) *', weightInput));
+    card.appendChild(weightHint);
+    const heightHint = el(`<div class="text-xs font-mono text-[var(--ink-2)] -mt-3 mb-3">${p.heightFt ? `≈ ${heightCm(p)} cm` : ''}</div>`);
+    function updateHeightHint(){ heightHint.textContent = p.heightFt ? `≈ ${heightCm(p)} cm` : ''; }
+    const heightFtInput = inputNum(p.heightFt, v=>{ p.heightFt=v; updateHeightHint(); });
+    const heightInInput = inputNum(p.heightIn, v=>{ p.heightIn=v; updateHeightHint(); });
     const hRow = el(`<div class="grid grid-cols-2 gap-3"></div>`);
-    hRow.appendChild(field('Height — Feet *', inputNum(p.heightFt, v=>{p.heightFt=v; render();})));
-    hRow.appendChild(field('Height — Inches', inputNum(p.heightIn, v=>{p.heightIn=v; render();})));
+    hRow.appendChild(field('Height — Feet *', heightFtInput));
+    hRow.appendChild(field('Height — Inches', heightInInput));
     card.appendChild(hRow);
-    if(p.heightFt) card.appendChild(el(`<div class="text-xs font-mono text-[var(--ink-2)] -mt-3 mb-3">≈ ${heightCm(p)} cm</div>`));
+    card.appendChild(heightHint);
     card.appendChild(field('Body Fat % (optional — leave blank to estimate from photo later)', inputNum(p.bodyFatPct, v=>p.bodyFatPct=v)));
 
     card.appendChild(el(`<div class="chalk-rule my-4"></div>`));
