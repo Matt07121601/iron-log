@@ -2558,6 +2558,20 @@ const SLOT_PLANS = {
 };
 const DAY_NAMES = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
 
+// Lets a client flag a specific ingredient they don't like directly from the
+// generated plan (e.g. tapping the ✕ next to "Tofu, firm") — adds it to their
+// profile's dislike list (same field set during onboarding, so it's respected
+// everywhere else too) and regenerates so it never appears again.
+function addDislikedFoodAndRegenerate(rawName){
+  const normalized = rawName.split(',')[0].trim().toLowerCase();
+  const current = (state.profile.dietaryDislikes||'').toLowerCase().split(',').map(s=>s.trim()).filter(Boolean);
+  if(!current.includes(normalized)){
+    state.profile.dietaryDislikes = state.profile.dietaryDislikes
+      ? state.profile.dietaryDislikes + ', ' + normalized
+      : normalized;
+  }
+  generateMealPlan();
+}
 function mealTemplateBlocked(tpl, restricted, disliked){
   const nameLower = tpl.name.toLowerCase();
   const ingredientNames = [tpl.proteinSource, tpl.carbSource, ...(tpl.fixedExtras||[]).map(e=>e.food)]
@@ -2946,6 +2960,26 @@ function renderMealPlanContent(result){
   headRow.appendChild(regenBtn);
   wrap.appendChild(headRow);
 
+  const dislikes = (state.profile.dietaryDislikes||'').split(',').map(s=>s.trim()).filter(Boolean);
+  if(dislikes.length){
+    const dislikeRow = el(`<div class="mb-4"></div>`);
+    dislikeRow.appendChild(el(`<div class="text-xs text-[var(--ink-2)] mb-1.5">Excluded from this plan:</div>`));
+    const chips = el(`<div class="flex flex-wrap gap-1.5"></div>`);
+    dislikes.forEach(d=>{
+      const chip = el(`<span class="text-xs bg-[var(--bg-2)] border border-[var(--line)] rounded-full pl-2.5 pr-1.5 py-1 flex items-center gap-1.5">${d}</span>`);
+      const removeBtn = el(`<button class="text-[var(--ink-2)] hover:text-[var(--chalk)]" title="Allow this again">✕</button>`);
+      removeBtn.onclick = ()=>{
+        const remaining = dislikes.filter(x=>x!==d);
+        state.profile.dietaryDislikes = remaining.join(', ');
+        generateMealPlan();
+      };
+      chip.appendChild(removeBtn);
+      chips.appendChild(chip);
+    });
+    dislikeRow.appendChild(chips);
+    wrap.appendChild(dislikeRow);
+  }
+
   const days = result.days || [];
   const dayTabs = el(`<div class="flex gap-1 overflow-x-auto mb-4 -mx-1 px-1"></div>`);
   days.forEach((d,i)=>{
@@ -2971,9 +3005,14 @@ function renderMealPlanContent(result){
         card.appendChild(el(`<div class="text-xs font-semibold mb-1" style="color:var(--chalk);">⚡ ${meal.timingNote}</div>`));
       }
       if(meal.ingredients && meal.ingredients.length){
-        const ingList = el(`<ul class="text-sm text-[var(--ink-1)] mt-2 space-y-0.5"></ul>`);
+        const ingList = el(`<ul class="text-sm text-[var(--ink-1)] mt-2 space-y-1"></ul>`);
         meal.ingredients.forEach(ing=>{
-          ingList.appendChild(el(`<li>• ${ing.item} — ${ing.grams}g (${ing.weightType})</li>`));
+          const li = el(`<li class="flex items-center justify-between gap-2"></li>`);
+          li.appendChild(el(`<span>• ${ing.item} — ${ing.grams}g (${ing.weightType})</span>`));
+          const dislikeBtn = el(`<button class="text-xs text-[var(--ink-2)] hover:text-[var(--alert)] shrink-0" title="Don't like this? Remove it from future plans">✕ Don't like</button>`);
+          dislikeBtn.onclick = ()=> addDislikedFoodAndRegenerate(ing.item);
+          li.appendChild(dislikeBtn);
+          ingList.appendChild(li);
         });
         card.appendChild(ingList);
       }
