@@ -194,7 +194,7 @@ let state = {
     name:'', gender:'', ageYears:'', ageMonths:'',
     weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg', theme:'dark',
     measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'},
-    intermittentFasting:{enabled:false, protocol:''}, usesProteinShake:false,
+    intermittentFasting:{enabled:false, protocol:''}, usesProteinShake:false, dailyTrainingTimes:{},
     goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:'', sessionMins:'', trainingTime:'AM',
     equipment:'', equipmentNotes:'', dietaryRestrictions:'', dietaryLikes:'', dietaryDislikes:'',
     programStartDate:''
@@ -282,7 +282,7 @@ function freshClientState(){
       name:'', gender:'', ageYears:'', ageMonths:'',
       weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg', theme:getStoredTheme(),
       measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'},
-      intermittentFasting:{enabled:false, protocol:''}, usesProteinShake:false,
+      intermittentFasting:{enabled:false, protocol:''}, usesProteinShake:false, dailyTrainingTimes:{},
       goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:'', sessionMins:'', trainingTime:'AM',
       equipment:'', equipmentNotes:'', dietaryRestrictions:'', dietaryLikes:'', dietaryDislikes:'',
       programStartDate:''
@@ -356,6 +356,18 @@ function ensureMealPlanFields(){
   }
   if(typeof state.profile.usesProteinShake!=='boolean') state.profile.usesProteinShake = false;
   if(!state.mealPlan) state.mealPlan = {status:'idle', result:null, generatedAt:null};
+  // Existing clients only had one blanket trainingTime for the whole week.
+  // Seed each day of the week with that same value as a sensible starting
+  // point — clients can then override individual days (e.g. a meeting pushes
+  // Tuesday's session to the evening) without affecting the rest of the week.
+  if(!state.profile.dailyTrainingTimes || typeof state.profile.dailyTrainingTimes!=='object' || Object.keys(state.profile.dailyTrainingTimes).length===0){
+    const fallback = state.profile.trainingTime || 'AM';
+    state.profile.dailyTrainingTimes = {};
+    DAY_NAMES.forEach(d=> state.profile.dailyTrainingTimes[d] = fallback);
+  }
+}
+function trainingTimeForDay(profile, dayName){
+  return (profile.dailyTrainingTimes && profile.dailyTrainingTimes[dayName]) || profile.trainingTime || 'AM';
 }
 // Existing clients already have a saved program with rest times generated under
 // the old uniform-per-day scheme. Recompute every exercise's rest time using the
@@ -2675,16 +2687,24 @@ function generateMealPlan(){
       // carb boost, per standard sports nutrition practice of timing carbs
       // around training. The slot the shake occupies is excluded from this
       // weighting since it's already accounted for above.
-      const trainAdjacentSlot = p.trainingTime==='PM' ? 'Dinner' : (p.trainingTime==='Midday' ? 'Lunch' : 'Breakfast');
       const shakeSlotIndex = usesShake ? slots.map((s,idx)=>({s,idx})).filter(x=>x.s==='Snack')[0]?.idx : -1;
       const weights = slots.map((s,i)=> i===shakeSlotIndex ? 0 : (s==='Snack' ? 1 : 3));
       const totalWeight = weights.reduce((a,b)=>a+b,0) || 1;
+      function slotForTrainingTime(tt){
+        return tt==='PM' ? 'Dinner' : (tt==='Midday' ? 'Lunch' : 'Breakfast');
+      }
 
       const days = [];
       const usedGrams = {}; // ingredient name -> total grams across the week, for the shopping list
       let snackOccurrence = 0;
 
       for(let d=0; d<7; d++){
+        const dayName = DAY_NAMES[d];
+        // Each day's own training time (which the client can set independently
+        // per day) determines which meal gets the carb-timing boost that day —
+        // a client training AM on Monday but PM on Tuesday gets genuinely
+        // different meal structures on those two days, not one fixed pattern.
+        const trainAdjacentSlot = slotForTrainingTime(trainingTimeForDay(p, dayName));
         const meals = [];
         snackOccurrence = 0;
         slots.forEach((slotType, i)=>{
@@ -2811,6 +2831,32 @@ function renderNutrition(){
   });
   wrap.appendChild(mealGrid);
 
+  wrap.appendChild(el(`<h3 class="font-display text-lg font-semibold mb-2">This Week's Training Times</h3>`));
+  wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-3">Set when you're actually training each day — meals below get structured around it (more carbs near your session). Life changes plans sometimes, so update any day here anytime and regenerate.</p>`));
+  const scheduleCard = el(`<div class="card p-4 mb-8"></div>`);
+  const scheduleGrid = el(`<div class="space-y-2"></div>`);
+  DAY_NAMES.forEach(day=>{
+    const row = el(`<div class="flex items-center justify-between gap-2"></div>`);
+    row.appendChild(el(`<div class="text-sm font-medium w-24 shrink-0">${day}</div>`));
+    const toggle = el(`<div class="flex gap-1 flex-1"></div>`);
+    [['AM','AM'],['Midday','Midday'],['PM','PM']].forEach(([val,label])=>{
+      const current = trainingTimeForDay(state.profile, day);
+      const b = el(`<button class="flex-1 px-2 py-1.5 rounded text-xs ${current===val?'btn-chalk':'btn-ghost'}">${label}</button>`);
+      b.onclick = ()=>{
+        state.profile.dailyTrainingTimes[day] = val;
+        queueSave(); render();
+      };
+      toggle.appendChild(b);
+    });
+    row.appendChild(toggle);
+    scheduleGrid.appendChild(row);
+  });
+  scheduleCard.appendChild(scheduleGrid);
+  if(state.mealPlan.status==='done'){
+    scheduleCard.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mt-3">Changed a day? Hit <b>Regenerate</b> below to update the meal plan.</p>`));
+  }
+  wrap.appendChild(scheduleCard);
+
   wrap.appendChild(el(`<h3 class="font-display text-lg font-semibold mb-3">Example 7-Day Meal Plan</h3>`));
   const planCard = el(`<div class="card p-4 mb-8"></div>`);
   if(state.mealPlan.status==='idle'){
@@ -2892,6 +2938,8 @@ function renderMealPlanContent(result){
 
   const activeDay = days[mealPlanActiveDay] || days[0];
   if(activeDay){
+    const tt = trainingTimeForDay(state.profile, activeDay.day);
+    wrap.appendChild(el(`<div class="text-xs font-mono text-[var(--ink-2)] mb-3">Training: ${tt} — meals structured accordingly</div>`));
     (activeDay.meals||[]).forEach(meal=>{
       const card = el(`<div class="card p-4 mb-3"></div>`);
       const mHead = el(`<div class="flex items-center justify-between mb-1"></div>`);
