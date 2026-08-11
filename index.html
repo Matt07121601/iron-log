@@ -1425,7 +1425,7 @@ function renderHeader(){
   if(session.role==='client'){ wrap.querySelector('#logoutBtn').onclick = logoutSession; }
   wrap.appendChild(el(`<div class="chalk-rule mt-4 mb-4"></div>`));
   const nav = el(`<div class="flex gap-1 overflow-x-auto -mx-1 px-1"></div>`);
-  const tabs = [['dashboard','Dashboard'],['workout','Workout'],['nutrition','Nutrition'],['tracker','Tracker'],['progress','Progress'],['photos','Photos']];
+  const tabs = [['dashboard','Dashboard'],['nutrition','Nutrition'],['tracker','Tracker'],['workout','Workout'],['progress','Progress'],['photos','Photos']];
   tabs.forEach(([key,label])=>{
     const b = el(`<button class="tab-btn px-3 py-2 border-b-2 whitespace-nowrap ${state.view===key?'active':''}">${label}</button>`);
     b.onclick = ()=> setView(key);
