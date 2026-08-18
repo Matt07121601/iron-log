@@ -195,6 +195,7 @@ let state = {
     weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg', theme:'dark',
     measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'},
     intermittentFasting:{enabled:false, protocol:''}, usesProteinShake:false, dailyTrainingTimes:{},
+    injuries:'', medicalConditions:'', gpClearance:false,
     targetSpec:{bodyFatPct:'', physiqueStyle:''},
     goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:'', sessionMins:'', trainingTime:'AM',
     equipment:'', equipmentNotes:'', dietaryRestrictions:'', dietaryLikes:'', dietaryDislikes:'',
@@ -221,6 +222,7 @@ let state = {
   logs:{
     workouts:{},      // key: 'dayName-YYYY-MM-DD' -> {date, dayName, exercises:{exName:[{weight,reps,rpe,done}]}}
     bodyweight:[],    // [{date, weightKg}]
+    heartRate:[],     // [{id, date, bpm, context:'resting'|'post-workout'|'live-session', source:'manual'|'bluetooth', maxBpm?, durationSec?}]
     food:{}           // key: YYYY-MM-DD -> [{name,cals,protein,carbs,fat}]
   }
 };
@@ -284,6 +286,7 @@ function freshClientState(){
       weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg', theme:getStoredTheme(),
       measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'},
       intermittentFasting:{enabled:false, protocol:''}, usesProteinShake:false, dailyTrainingTimes:{},
+      injuries:'', medicalConditions:'', gpClearance:false,
       targetSpec:{bodyFatPct:'', physiqueStyle:''},
       goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:'', sessionMins:'', trainingTime:'AM',
       equipment:'', equipmentNotes:'', dietaryRestrictions:'', dietaryLikes:'', dietaryDislikes:'',
@@ -303,7 +306,7 @@ function freshClientState(){
     program:null, targets:null, view:'dashboard', activeDayIndex:0,
     quoteQueue:[], showingQuoteFor:null,
     foodSearch:{mode:'search', query:'', results:[], selected:null, qty:100, scanError:null, usedFallback:false},
-    logs:{workouts:{}, bodyweight:[], food:{}}
+    logs:{workouts:{}, bodyweight:[], heartRate:[], food:{}}
   };
 }
 async function loadClientState(id){
@@ -323,6 +326,7 @@ async function loadClientState(id){
   ensureMeasurementsField();
   ensureMealPlanFields();
   ensureTargetSpec();
+  ensureHeartRateLog();
   queueSave();
 }
 // Existing clients won't have a programStartDate saved (added alongside the
@@ -379,6 +383,9 @@ function ensureTargetSpec(){
   if(!state.profile.targetSpec || typeof state.profile.targetSpec!=='object'){
     state.profile.targetSpec = {bodyFatPct:'', physiqueStyle:''};
   }
+}
+function ensureHeartRateLog(){
+  if(!Array.isArray(state.logs.heartRate)) state.logs.heartRate = [];
 }
 // Existing clients already have a saved program with rest times generated under
 // the old uniform-per-day scheme. Recompute every exercise's rest time using the
@@ -953,6 +960,60 @@ const COOLDOWN_STRETCHES_BY_MUSCLE = {
 // Builds a session's general warm-up and cool-down from whichever muscle
 // groups its exercises actually use, so a leg day and a push day get
 // genuinely different protocols rather than one generic routine.
+// Which equipment tier(s) to offer as a fallback when a client can't access
+// their normal setup — includes bodyweight-only explicitly, since "no gym"
+// doesn't necessarily mean "has dumbbells at home" too.
+function fallbackEquipmentTiers(currentEquipment){
+  if(currentEquipment==='gym') return ['home','bodyweight'];
+  if(currentEquipment==='home') return ['bodyweight'];
+  return [];
+}
+function fallbackEquipmentTier(currentEquipment){
+  const tiers = fallbackEquipmentTiers(currentEquipment);
+  return tiers.length ? tiers[0] : null;
+}
+// Builds a same-muscle-group equivalent of a day's exercises using a
+// different equipment tier's library — matches purely by muscle tag rather
+// than by which pool (push/pull/legs) the original came from, since that's
+// more robust and doesn't require threading extra metadata through the
+// already-built program.
+// The three equipment libraries don't use perfectly identical muscle-group
+// names (e.g. bodyweight has no "Posterior Chain" or "Lats" tag at all) —
+// these aliases bridge that gap so a same-muscle match can still be found,
+// rather than silently keeping an exercise the target tier can't actually do.
+const MUSCLE_ALIASES = {
+  'Posterior Chain': ['Lower Back', 'Hamstrings'],
+  'Lats': ['Back'],
+  'Traps': ['Back', 'Shoulders'],
+  'Lower Back': ['Posterior Chain', 'Core'],
+};
+function buildEquipmentEquivalentDay(day, targetEquipment){
+  const targetLib = EX[targetEquipment];
+  if(!targetLib) return day;
+  const allTargetExercises = [];
+  Object.values(targetLib).forEach(pool=> pool.forEach(e=> allTargetExercises.push(e)));
+
+  const usedNames = new Set();
+  const substituted = day.exercises.map(ex=>{
+    if(ex.muscle==='Conditioning') return ex; // cardio doesn't need gym equipment either way
+    const tryMuscles = [ex.muscle, ...(MUSCLE_ALIASES[ex.muscle]||[])];
+    let chosen = null;
+    for(const m of tryMuscles){
+      const fresh = allTargetExercises.filter(e=> e.m===m && !usedNames.has(e.n));
+      if(fresh.length){ chosen = fresh[0]; break; }
+      const anyMatch = allTargetExercises.filter(e=> e.m===m);
+      if(anyMatch.length && !chosen){ chosen = anyMatch[0]; }
+    }
+    if(!chosen) return ex; // genuinely nothing compatible found — keep original rather than dropping it
+    usedNames.add(chosen.n);
+    // Technique pairing (supersets etc.) assumed the original exercises —
+    // reset to straight sets for an improvised substitute session.
+    return {...ex, name:chosen.n, muscle:chosen.m, technique:'straight', supersetGroup:undefined};
+  });
+  const wc = buildSessionWarmupCooldown(substituted);
+  return {name:day.name, exercises:substituted, warmup:wc.warmup, cooldown:wc.cooldown};
+}
+
 function buildSessionWarmupCooldown(exercises){
   const muscles = [...new Set((exercises||[]).map(e=>e.muscle).filter(m=>m && m!=='Conditioning'))];
   const warmupMoves = [];
@@ -1049,6 +1110,33 @@ function applyCardioToProgram(days, profile, bodyMods){
   return cardio;
 }
 
+/* ============================= HEALTH & SAFETY CONSIDERATIONS ============================= */
+// Keyword-matched exclusion of exercises that commonly place higher stress on
+// a disclosed injury area — a standard, non-clinical precaution any personal
+// trainer would take (avoid loading an injured joint), not medical advice.
+// Deliberately conservative and small per area, so the exercise pool stays
+// workable even with multiple disclosed areas; anything not automatically
+// excluded should still be discussed with the client's GP/physio, which the
+// program note makes explicit.
+const INJURY_EXERCISE_EXCLUSIONS = {
+  knee: ['Jump Squat', 'Bulgarian Split Squat', 'Nordic Curl'],
+  shoulder: ['Overhead Press', 'Arnold Press', 'Wall Handstand Push-Up', 'Wall Handstand Hold', 'Dips'],
+  back: ['Deadlift', 'Romanian Deadlift', 'Front Squat'],
+  spine: ['Deadlift', 'Romanian Deadlift', 'Front Squat'],
+  hip: ['Bulgarian Split Squat', 'Single-Leg Hip Thrust'],
+  elbow: ['Skull Crusher', 'Dips', 'Close-Grip Push-Up'],
+  wrist: ['Push-Up', 'Diamond Push-Up', 'Close-Grip Push-Up'],
+  ankle: ['Jump Squat'],
+  neck: ['Barbell Shrug']
+};
+function injuryKeywordsFrom(text){
+  const lower = (text||'').toLowerCase();
+  return Object.keys(INJURY_EXERCISE_EXCLUSIONS).filter(kw=> lower.includes(kw));
+}
+function isExerciseExcludedForInjuries(exerciseName, injuryKeywords){
+  return injuryKeywords.some(kw=> (INJURY_EXERCISE_EXCLUSIONS[kw]||[]).some(ex=> exerciseName.includes(ex)));
+}
+
 function buildProgram(p){
   const days = parseInt(p.daysPerWeek)||3;
   const lib = EX[p.equipment] || EX.gym;
@@ -1082,6 +1170,11 @@ function buildProgram(p){
       }
     }
     else { pool = lib[day.pool].slice(); }
+    const injuryKeywords = injuryKeywordsFrom(p.injuries);
+    if(injuryKeywords.length){
+      const filtered = pool.filter(e=> !isExerciseExcludedForInjuries(e.n, injuryKeywords));
+      if(filtered.length>=3) pool = filtered; // keep enough variety; skip filtering if it would gut the pool
+    }
     // rotate based on how many times this exact split-type (e.g. 'push,pull' or 'legs')
     // has already appeared in the week, so e.g. Upper A and Upper B don't pull identical exercises
     const poolKey = Array.isArray(day.pool) ? day.pool.join(',') : day.pool;
@@ -1306,6 +1399,7 @@ function render(){
   if(!session.role){ root.appendChild(renderGate()); return; }
   if(session.role==='coach' && !session.clientId){ root.appendChild(renderCoachDashboard()); return; }
   if(!state.onboarded){ root.appendChild(renderOnboarding()); return; }
+  if(session.role==='client' && !state.profile.gpClearance){ root.appendChild(renderHealthSafetyGate()); return; }
   root.appendChild(renderHeader());
   const content = document.createElement('div');
   content.className='mt-6';
@@ -1796,7 +1890,7 @@ function renderHeader(){
 }
 
 /* ============================= ONBOARDING ============================= */
-const TOTAL_STEPS = 9;
+const TOTAL_STEPS = 10;
 let onboardError = null;
 function validateStep(step, p){
   if(step===0){
@@ -1813,6 +1907,9 @@ function validateStep(step, p){
   }
   else if(step===8){
     if(!p.trainingExperience) return 'Please select your training experience level.';
+  }
+  else if(step===9){
+    if(!p.gpClearance) return 'Please confirm the health & safety declaration to continue.';
   }
   else if(step===4){
     if(!p.work) return 'Please select your day-to-day work type.';
@@ -1909,6 +2006,56 @@ function applyExperienceModifiers(level){
   return mods[level] || mods.intermediate;
 }
 
+// Shown to any client who hasn't completed the health & safety declaration —
+// covers existing clients who onboarded before this feature existed, so the
+// gate genuinely applies to everyone before they see their program/nutrition,
+// not just new signups.
+function renderHealthSafetyGate(){
+  const p = state.profile;
+  const wrap = el(`<div class="pt-10 max-w-2xl mx-auto"></div>`);
+  wrap.appendChild(el(`<div class="mb-6 text-center"><div class="label">One More Thing</div><h1 class="font-display text-2xl font-bold mt-1">Health & Safety</h1></div>`));
+  const card = el(`<div class="card p-5 sm:p-8"></div>`);
+  card.appendChild(el(`<p class="text-sm text-[var(--ink-2)] mb-4">Optional, but if you share anything here, your program and nutrition targets take it into account.</p>`));
+  const injuriesTa = el(`<textarea rows="3" placeholder="e.g. previous shoulder dislocation, ongoing lower back tightness"></textarea>`);
+  injuriesTa.value = p.injuries||'';
+  injuriesTa.oninput = (e)=> p.injuries = e.target.value;
+  card.appendChild(field('Injuries — current or previous (optional)', injuriesTa));
+  const medicalTa = el(`<textarea rows="3" placeholder="e.g. asthma, high blood pressure, diabetes"></textarea>`);
+  medicalTa.value = p.medicalConditions||'';
+  medicalTa.oninput = (e)=> p.medicalConditions = e.target.value;
+  card.appendChild(field('Medical conditions (optional)', medicalTa));
+
+  card.appendChild(el(`<div class="chalk-rule my-4"></div>`));
+  const disclaimerBox = el(`<div class="p-3 rounded-lg text-xs text-[var(--ink-2)] leading-relaxed mb-3" style="background:var(--bg-2);"></div>`);
+  disclaimerBox.appendChild(el(`<p class="mb-2">By ticking the box below, you confirm that you have consulted your GP or an appropriate medical professional and been advised that you are fit to take part in exercise and the dietary changes recommended by this app.</p>`));
+  disclaimerBox.appendChild(el(`<p>You understand that this app does not provide medical advice, and that neither this app nor its creator accepts any liability for injury, or for the worsening of any pre-existing medical condition, arising from your participation in the exercise or nutrition program it provides.</p>`));
+  card.appendChild(disclaimerBox);
+
+  const checkRow = el(`<label class="flex items-start gap-3 p-3 rounded-lg cursor-pointer mb-4" style="background:var(--bg-2);"></label>`);
+  const checkbox = el(`<input type="checkbox" class="mt-1" style="width:18px; height:18px; flex-shrink:0;">`);
+  checkRow.appendChild(checkbox);
+  checkRow.appendChild(el(`<span class="text-sm text-[var(--ink-1)]">I confirm my GP has advised me I am fit to take part in exercise, and I accept the declaration above. *</span>`));
+  card.appendChild(checkRow);
+
+  const err = el(`<div class="text-xs text-[var(--alert)] mb-3 hidden">Please confirm the health & safety declaration to continue.</div>`);
+  card.appendChild(err);
+
+  const continueBtn = el(`<button class="btn btn-chalk px-6 py-3 rounded-lg w-full">Continue</button>`);
+  continueBtn.onclick = ()=>{
+    if(!checkbox.checked){ err.classList.remove('hidden'); return; }
+    p.gpClearance = true;
+    // Existing clients' program/targets were built before this data existed —
+    // regenerate now so any disclosed injury is actually reflected, rather
+    // than just being stored and ignored.
+    state.targets = calcTargets(p);
+    state.program = buildProgram(p);
+    queueSave();
+    render();
+  };
+  card.appendChild(continueBtn);
+  wrap.appendChild(card);
+  return wrap;
+}
 function renderOnboarding(){
   const wrap = el(`<div class="pt-10 max-w-2xl mx-auto"></div>`);
   wrap.appendChild(el(`
@@ -2135,6 +2282,32 @@ function renderOnboarding(){
     });
     card.appendChild(grid);
   }
+  else if(state.step===9){
+    card.appendChild(el(`<h2 class="font-display text-xl mb-2">Health & Safety</h2>`));
+    card.appendChild(el(`<p class="text-sm text-[var(--ink-2)] mb-4">Optional, but if you share anything here, your program and nutrition targets take it into account.</p>`));
+    const injuriesTa2 = el(`<textarea rows="3" placeholder="e.g. previous shoulder dislocation, ongoing lower back tightness"></textarea>`);
+    injuriesTa2.value = p.injuries||'';
+    injuriesTa2.oninput = (e)=> p.injuries = e.target.value;
+    card.appendChild(field('Injuries — current or previous (optional)', injuriesTa2));
+    const medicalTa2 = el(`<textarea rows="3" placeholder="e.g. asthma, high blood pressure, diabetes"></textarea>`);
+    medicalTa2.value = p.medicalConditions||'';
+    medicalTa2.oninput = (e)=> p.medicalConditions = e.target.value;
+    card.appendChild(field('Medical conditions (optional)', medicalTa2));
+
+    card.appendChild(el(`<div class="chalk-rule my-4"></div>`));
+    const disclaimerBox = el(`<div class="p-3 rounded-lg text-xs text-[var(--ink-2)] leading-relaxed mb-3" style="background:var(--bg-2);"></div>`);
+    disclaimerBox.appendChild(el(`<p class="mb-2">By ticking the box below, you confirm that you have consulted your GP or an appropriate medical professional and been advised that you are fit to take part in exercise and the dietary changes recommended by this app.</p>`));
+    disclaimerBox.appendChild(el(`<p>You understand that this app does not provide medical advice, and that neither this app nor its creator accepts any liability for injury, or for the worsening of any pre-existing medical condition, arising from your participation in the exercise or nutrition program it provides.</p>`));
+    card.appendChild(disclaimerBox);
+
+    const checkRow = el(`<label class="flex items-start gap-3 p-3 rounded-lg cursor-pointer" style="background:var(--bg-2);"></label>`);
+    const checkbox = el(`<input type="checkbox" class="mt-1" style="width:18px; height:18px; flex-shrink:0;">`);
+    checkbox.checked = !!p.gpClearance;
+    checkbox.onchange = (e)=>{ p.gpClearance = e.target.checked; render(); };
+    checkRow.appendChild(checkbox);
+    checkRow.appendChild(el(`<span class="text-sm text-[var(--ink-1)]">I confirm my GP has advised me I am fit to take part in exercise, and I accept the declaration above. *</span>`));
+    card.appendChild(checkRow);
+  }
 
   wrap.appendChild(card);
 
@@ -2299,6 +2472,7 @@ function dismissQuote(){
 
 /* ============================= COACH PROGRAM EDITING ============================= */
 let workoutEditMode = false;
+let homeAltDayIndex = {}; // dayIndex -> 'home'|'bodyweight'|undefined, "no gym today" toggle, session-only (not persisted)
 function updateProgramField(dayIdx, exIdx, field, value){
   state.program[dayIdx].exercises[exIdx][field] = value;
   queueSave();
@@ -2616,6 +2790,14 @@ function renderWorkoutView(){
       wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-4">Includes ~${totalMin} min/week of cardio (${parts.join(' + ')}), tailored to your goal and physique data — placed after lifting on the relevant days to minimize interference with strength.</p>`));
     }
   }
+  if(!workoutEditMode && state.profile.injuries){
+    const injuryKw = injuryKeywordsFrom(state.profile.injuries);
+    if(injuryKw.length){
+      wrap.appendChild(el(`<p class="text-xs mb-4" style="color:var(--alert);">⚠ Adjusted for your disclosed injuries (${injuryKw.join(', ')}): some higher-risk exercises have been excluded. This isn't a substitute for guidance from your GP or physio — check with them before adding anything back in.</p>`));
+    } else {
+      wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-4">You've disclosed an injury on file. Keep your coach and GP/physio in the loop, and flag anything that doesn't feel right.</p>`));
+    }
+  }
   if(!workoutEditMode && state.analysis.baseline.status==='done' && state.analysis.baseline.result && state.analysis.baseline.result.trainingFocus){
     wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-4"><span style="color:var(--chalk);">From your photo comparison:</span> ${state.analysis.baseline.result.trainingFocus}</p>`));
   }
@@ -2633,7 +2815,36 @@ function renderWorkoutView(){
     }
   }
 
-  const day = state.program[state.activeDayIndex];
+  const gymDay = state.program[state.activeDayIndex];
+  const availableTiers = fallbackEquipmentTiers(state.profile.equipment);
+  const activeTier = homeAltDayIndex[state.activeDayIndex];
+  const usingAlt = !workoutEditMode && activeTier && availableTiers.includes(activeTier);
+  const day = usingAlt ? buildEquipmentEquivalentDay(gymDay, activeTier) : gymDay;
+
+  const TIER_LABELS = {home:'At-Home (Dumbbells/Bands)', bodyweight:'Bodyweight-Only'};
+  const TIER_ICONS = {home:'🏠', bodyweight:'🧘'};
+  if(!workoutEditMode && availableTiers.length){
+    if(usingAlt){
+      const banner = el(`<div class="flex items-center justify-between p-3 rounded-lg mb-4 flex-wrap gap-2" style="background:var(--bg-2); border:1px solid var(--chalk-dim);"></div>`);
+      banner.appendChild(el(`<div class="text-sm" style="color:var(--chalk);">${TIER_ICONS[activeTier]} Showing today's ${TIER_LABELS[activeTier]} alternative — same muscle groups, different equipment.</div>`));
+      const revertBtn = el(`<button class="btn btn-ghost text-xs px-3 py-2 rounded-lg">↩ Back to Usual Version</button>`);
+      revertBtn.onclick = ()=>{ homeAltDayIndex[state.activeDayIndex]=undefined; render(); };
+      banner.appendChild(revertBtn);
+      wrap.appendChild(banner);
+    } else {
+      const swapWrap = el(`<div class="mb-4"></div>`);
+      swapWrap.appendChild(el(`<div class="text-xs text-[var(--ink-2)] mb-1.5">No gym today? Get a version matching what you've actually got:</div>`));
+      const btnRow = el(`<div class="flex gap-2 flex-wrap"></div>`);
+      availableTiers.forEach(tier=>{
+        const btn = el(`<button class="btn btn-ghost text-xs px-3 py-2 rounded-lg">${TIER_ICONS[tier]} ${TIER_LABELS[tier]}</button>`);
+        btn.onclick = ()=>{ homeAltDayIndex[state.activeDayIndex]=tier; render(); };
+        btnRow.appendChild(btn);
+      });
+      swapWrap.appendChild(btnRow);
+      wrap.appendChild(swapWrap);
+    }
+  }
+
 
   if(workoutEditMode){
     const dayHeadRow = el(`<div class="flex items-center gap-2 mb-4"></div>`);
@@ -3012,6 +3223,21 @@ function mealTemplateBlocked(tpl, restricted, disliked){
 // ingredients and macros (summed from real per-100g data) — close to target,
 // not forced to match exactly, which is honest given whole foods rarely land
 // on an exact number.
+// Realistic single-meal serving ceilings, by food — hitting a macro target
+// exactly isn't useful if it means 400g of rice in one sitting. When the
+// target genuinely exceeds what's realistic, the meal will land a bit under
+// its macro target rather than producing an unrealistic portion.
+const FOOD_MAX_GRAMS = {
+  'Rice, cooked, white':220, 'Brown rice, cooked':220, 'Pasta, cooked':220,
+  'Couscous, cooked':200, 'Noodles, cooked':220, 'Quinoa, cooked':200,
+  'Oats, dry':100, 'Potato, boiled':350, 'Sweet potato, cooked':350,
+  'Wholemeal bread':150, 'Granola':90, 'Rice cakes':60,
+  'Chicken breast, cooked':280, 'Chicken thigh, cooked':280, 'Salmon, cooked':280,
+  'Lean beef mince 5%':280, 'Turkey mince, breast':280, 'Tofu, firm':300,
+  'Greek yoghurt, plain 0%':350, 'Cottage cheese, low fat':300,
+  'Tuna, canned in water':250, 'Egg, whole, boiled':240
+};
+function maxRealisticGrams(foodName){ return FOOD_MAX_GRAMS[foodName] || 400; }
 function scaleMealTemplate(tpl, targetCals, targetProtein, targetCarbs){
   const ingredients = [];
   let runningProtein = 0, runningCarbs = 0, runningFat = 0, runningCals = 0;
@@ -3033,15 +3259,15 @@ function scaleMealTemplate(tpl, targetCals, targetProtein, targetCarbs){
   // solving protein and carbs as two independent passes without correcting for
   // that caused a systematic protein overshoot. This does a first pass, then a
   // second pass that accounts for the carb source's own protein contribution.
-  let proteinGrams = proteinFood ? Math.max(30, Math.min(400, ((targetProtein - fixedProtein) / proteinPer100) * 100)) : 0;
+  let proteinGrams = proteinFood ? Math.max(30, Math.min(maxRealisticGrams(tpl.proteinSource), ((targetProtein - fixedProtein) / proteinPer100) * 100)) : 0;
   if(tpl.isShake) proteinGrams = 30; // one standard scoop, not scaled
   let carbGrams = 0;
   if(carbFood){
     const proteinFromFirstPass = proteinFood ? scaleMacros(proteinFood.per100, proteinGrams).protein : 0;
-    carbGrams = Math.max(20, Math.min(500, ((targetCarbs - fixedCarbs - (proteinFood?scaleMacros(proteinFood.per100,proteinGrams).carbs:0)) / carbsPer100) * 100));
+    carbGrams = Math.max(20, Math.min(maxRealisticGrams(tpl.carbSource), ((targetCarbs - fixedCarbs - (proteinFood?scaleMacros(proteinFood.per100,proteinGrams).carbs:0)) / carbsPer100) * 100));
     if(proteinFood && !tpl.isShake){
       const carbSourceProtein = scaleMacros(carbFood.per100, carbGrams).protein;
-      proteinGrams = Math.max(30, Math.min(400, ((targetProtein - fixedProtein - carbSourceProtein) / proteinPer100) * 100));
+      proteinGrams = Math.max(30, Math.min(maxRealisticGrams(tpl.proteinSource), ((targetProtein - fixedProtein - carbSourceProtein) / proteinPer100) * 100));
     }
   }
 
@@ -3257,6 +3483,14 @@ function renderNutrition(){
       measCard.appendChild(row);
     });
     wrap.appendChild(measCard);
+  }
+
+  if(state.profile.medicalConditions){
+    const medCard = el(`<div class="card p-4 mb-8" style="border-color:var(--chalk-dim);"></div>`);
+    medCard.appendChild(el(`<div class="label mb-2" style="color:var(--chalk);">Medical Conditions on File</div>`));
+    medCard.appendChild(el(`<p class="text-sm text-[var(--ink-1)] mb-2">${state.profile.medicalConditions}</p>`));
+    medCard.appendChild(el(`<p class="text-xs text-[var(--ink-2)]">These targets are general fitness guidance, not clinical nutrition therapy. If your condition has specific dietary requirements, please check these targets with your GP or a registered dietitian.</p>`));
+    wrap.appendChild(medCard);
   }
 
   const grid = el(`<div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8"></div>`);
@@ -3952,6 +4186,77 @@ function renderManualPanel(){
 }
 
 /* ============================= PROGRESS ============================= */
+/* ============================= HEART RATE ============================= */
+// Live connection uses the standard Bluetooth GATT Heart Rate Service, which
+// virtually all chest straps and many watches broadcast (Polar, Wahoo,
+// Garmin, etc.) — no per-brand integration needed. Only available where the
+// browser implements Web Bluetooth: Android Chrome and desktop Chrome/Edge.
+// iOS Safari has never implemented Web Bluetooth, so this is invisible there
+// by platform limitation, not a bug — manual entry covers everyone instead.
+let hrDevice = null, hrServer = null, hrCharacteristic = null;
+let hrSession = null; // {startedAt, readings:[bpm,...]}
+function bluetoothSupported(){
+  return typeof navigator!=='undefined' && !!navigator.bluetooth;
+}
+// Parses the standard GATT Heart Rate Measurement characteristic. Byte 0 is a
+// flags byte; bit 0 selects whether the value is UINT8 or UINT16.
+function parseHeartRateValue(dataView){
+  const flags = dataView.getUint8(0);
+  const rate16Bits = flags & 0x1;
+  return rate16Bits ? dataView.getUint16(1, true) : dataView.getUint8(1);
+}
+async function connectHeartRateMonitor(){
+  if(!bluetoothSupported()){ return; }
+  try{
+    hrDevice = await navigator.bluetooth.requestDevice({filters:[{services:['heart_rate']}]});
+    hrDevice.addEventListener('gattserverdisconnected', onHrDisconnected);
+    hrServer = await hrDevice.gatt.connect();
+    const service = await hrServer.getPrimaryService('heart_rate');
+    hrCharacteristic = await service.getCharacteristic('heart_rate_measurement');
+    await hrCharacteristic.startNotifications();
+    hrSession = {startedAt: Date.now(), readings: []};
+    hrCharacteristic.addEventListener('characteristicvaluechanged', onHrReading);
+    render();
+  }catch(e){
+    console.error('Heart rate connection failed or was cancelled:', e);
+    hrDevice = null; hrServer = null; hrCharacteristic = null; hrSession = null;
+    render();
+  }
+}
+function onHrReading(event){
+  const bpm = parseHeartRateValue(event.target.value);
+  if(hrSession) hrSession.readings.push(bpm);
+  render();
+}
+function onHrDisconnected(){
+  hrDevice = null; hrServer = null; hrCharacteristic = null;
+  render();
+}
+function disconnectHeartRateMonitor(){
+  if(hrDevice && hrDevice.gatt && hrDevice.gatt.connected){ hrDevice.gatt.disconnect(); }
+  hrDevice = null; hrServer = null; hrCharacteristic = null;
+}
+function saveHrSession(){
+  if(!hrSession || hrSession.readings.length===0){ hrSession = null; render(); return; }
+  const readings = hrSession.readings;
+  const avgBpm = Math.round(readings.reduce((a,b)=>a+b,0)/readings.length);
+  const maxBpm = Math.max(...readings);
+  const durationSec = Math.round((Date.now()-hrSession.startedAt)/1000);
+  state.logs.heartRate.push({
+    id: genCode(8), date: todayISO(), bpm: avgBpm, maxBpm, durationSec,
+    context:'live-session', source:'bluetooth'
+  });
+  hrSession = null;
+  queueSave(); render();
+}
+function logManualHeartRate(bpm, context){
+  const v = parseInt(bpm);
+  if(!v || v<30 || v>250) return false;
+  state.logs.heartRate.push({id: genCode(8), date: todayISO(), bpm:v, context, source:'manual'});
+  queueSave(); render();
+  return true;
+}
+
 let chartInstances = [];
 function renderProgress(){
   chartInstances.forEach(c=>c.destroy());
@@ -3977,6 +4282,71 @@ function renderProgress(){
       }));
     },0);
   }
+
+  // heart rate section
+  const hrCard = el(`<div class="card p-4 mb-5"></div>`);
+  hrCard.appendChild(el(`<div class="label mb-3">Heart Rate</div>`));
+
+  // manual entry — works on every device/browser
+  const manualRow = el(`<div class="flex gap-2 mb-3"></div>`);
+  const bpmInput = el(`<input type="number" placeholder="BPM" class="w-24">`);
+  const contextSelect = selectEl(['resting','post-workout'], 'resting', ()=>{}, ['Resting','Post-Workout']);
+  const logBtn = el(`<button class="btn btn-chalk px-4 py-2 rounded-lg text-sm">Log</button>`);
+  logBtn.onclick = ()=>{
+    const ok = logManualHeartRate(bpmInput.value, contextSelect.value);
+    if(ok) bpmInput.value = '';
+  };
+  manualRow.appendChild(bpmInput);
+  manualRow.appendChild(contextSelect);
+  manualRow.appendChild(logBtn);
+  hrCard.appendChild(manualRow);
+
+  // live Bluetooth connection — Android/desktop Chrome & Edge only, since
+  // iOS Safari has never implemented Web Bluetooth (a platform limitation,
+  // not something fixable from a website).
+  if(!bluetoothSupported()){
+    hrCard.appendChild(el(`<p class="text-xs text-[var(--ink-2)]">Live heart rate monitor connection isn't available in this browser (works on Android or desktop Chrome/Edge — not iOS Safari). Manual logging above works everywhere.</p>`));
+  } else if(hrDevice && hrDevice.gatt && hrDevice.gatt.connected){
+    const liveWrap = el(`<div class="p-3 rounded-lg mb-2" style="background:var(--bg-2);"></div>`);
+    const latest = hrSession && hrSession.readings.length ? hrSession.readings[hrSession.readings.length-1] : null;
+    liveWrap.appendChild(el(`<div class="flex items-baseline gap-2"><div class="font-display text-4xl font-bold" style="color:var(--chalk);">${latest||'--'}</div><div class="text-sm text-[var(--ink-2)]">bpm live · ${hrDevice.name||'connected device'}</div></div>`));
+    if(hrSession && hrSession.readings.length){
+      const avg = Math.round(hrSession.readings.reduce((a,b)=>a+b,0)/hrSession.readings.length);
+      const max = Math.max(...hrSession.readings);
+      liveWrap.appendChild(el(`<div class="text-xs font-mono text-[var(--ink-2)] mt-1">Session avg ${avg} · max ${max} · ${hrSession.readings.length} readings</div>`));
+    }
+    const btnRow = el(`<div class="flex gap-2 mt-2"></div>`);
+    const saveBtn = el(`<button class="btn btn-chalk px-4 py-2 rounded-lg text-sm">Save Session</button>`);
+    saveBtn.onclick = ()=>{ disconnectHeartRateMonitor(); saveHrSession(); };
+    const stopBtn = el(`<button class="btn btn-ghost px-4 py-2 rounded-lg text-sm">Disconnect</button>`);
+    stopBtn.onclick = ()=>{ disconnectHeartRateMonitor(); hrSession=null; render(); };
+    btnRow.appendChild(saveBtn); btnRow.appendChild(stopBtn);
+    liveWrap.appendChild(btnRow);
+    hrCard.appendChild(liveWrap);
+  } else {
+    const connectBtn = el(`<button class="btn btn-ghost px-4 py-2 rounded-lg text-sm">📡 Connect Heart Rate Monitor</button>`);
+    connectBtn.onclick = connectHeartRateMonitor;
+    hrCard.appendChild(connectBtn);
+    hrCard.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mt-2">Works with most Bluetooth chest straps and watches (Polar, Wahoo, Garmin, etc.) — put your strap in pairing mode first.</p>`));
+  }
+
+  if(state.logs.heartRate.length>0){
+    const sortedHr = [...state.logs.heartRate].sort((a,b)=>a.date<b.date?-1:1);
+    const latestHr = sortedHr[sortedHr.length-1];
+    hrCard.appendChild(el(`<div class="text-xs font-mono text-[var(--ink-2)] mt-3">Latest: ${latestHr.bpm} bpm (${latestHr.context}) on ${latestHr.date}</div>`));
+    hrCard.appendChild(el(`<canvas height="90" class="mt-2"></canvas>`));
+    setTimeout(()=>{
+      const canvas = hrCard.querySelector('canvas');
+      if(!canvas) return;
+      const ctx = canvas.getContext('2d');
+      chartInstances.push(new Chart(ctx, {
+        type:'line',
+        data:{labels:sortedHr.map(e=>e.date), datasets:[{data:sortedHr.map(e=>e.bpm), borderColor:currentTheme().chalk, backgroundColor:`rgba(${currentTheme().rgb},0.15)`, fill:true, tension:0.3}]},
+        options: chartOpts()
+      }));
+    },0);
+  }
+  wrap.appendChild(hrCard);
 
   // per-exercise charts
   const exNames = new Set();
