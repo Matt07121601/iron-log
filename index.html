@@ -195,6 +195,7 @@ let state = {
     weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg', theme:'dark',
     measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'},
     intermittentFasting:{enabled:false, protocol:''}, usesProteinShake:false, dailyTrainingTimes:{},
+    priorityMuscles:[],
     injuries:'', medicalConditions:'', gpClearance:false,
     targetSpec:{bodyFatPct:'', physiqueStyle:''},
     goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:'', sessionMins:'', trainingTime:'AM',
@@ -286,6 +287,7 @@ function freshClientState(){
       weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg', theme:getStoredTheme(),
       measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'},
       intermittentFasting:{enabled:false, protocol:''}, usesProteinShake:false, dailyTrainingTimes:{},
+      priorityMuscles:[],
       injuries:'', medicalConditions:'', gpClearance:false,
       targetSpec:{bodyFatPct:'', physiqueStyle:''},
       goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:'', sessionMins:'', trainingTime:'AM',
@@ -327,6 +329,7 @@ async function loadClientState(id){
   ensureMealPlanFields();
   ensureTargetSpec();
   ensureHeartRateLog();
+  ensurePriorityMuscles();
   queueSave();
 }
 // Existing clients won't have a programStartDate saved (added alongside the
@@ -387,6 +390,9 @@ function ensureTargetSpec(){
 function ensureHeartRateLog(){
   if(!Array.isArray(state.logs.heartRate)) state.logs.heartRate = [];
 }
+function ensurePriorityMuscles(){
+  if(!Array.isArray(state.profile.priorityMuscles)) state.profile.priorityMuscles = [];
+}
 // Existing clients already have a saved program with rest times generated under
 // the old uniform-per-day scheme. Recompute every exercise's rest time using the
 // current compound/isolation rule, so existing clients get the update too, not
@@ -445,6 +451,7 @@ function ensureProgramTechniques(){
   const alreadyAssigned = state.program.some(day=> (day.exercises||[]).some(ex=> ex.technique));
   if(alreadyAssigned) return;
   state.program.forEach(day=> assignTrainingTechniques(day.exercises, state.profile));
+  state.program.forEach(day=> { day.exercises = orderExercisesByEvidence(day.exercises); });
 }
 // Migrates any client saved before the baseline/target/check-in photo redesign
 // (old shape: photos:{front,side,rear,target}, analysis:{status,result}) into the
@@ -1010,8 +1017,9 @@ function buildEquipmentEquivalentDay(day, targetEquipment){
     // reset to straight sets for an improvised substitute session.
     return {...ex, name:chosen.n, muscle:chosen.m, technique:'straight', supersetGroup:undefined};
   });
-  const wc = buildSessionWarmupCooldown(substituted);
-  return {name:day.name, exercises:substituted, warmup:wc.warmup, cooldown:wc.cooldown};
+  const ordered = orderExercisesByEvidence(substituted);
+  const wc = buildSessionWarmupCooldown(ordered);
+  return {name:day.name, exercises:ordered, warmup:wc.warmup, cooldown:wc.cooldown};
 }
 
 function buildSessionWarmupCooldown(exercises){
@@ -1137,6 +1145,37 @@ function isExerciseExcludedForInjuries(exerciseName, injuryKeywords){
   return injuryKeywords.some(kw=> (INJURY_EXERCISE_EXCLUSIONS[kw]||[]).some(ex=> exerciseName.includes(ex)));
 }
 
+// Compound (multi-joint) exercises before isolation (single-joint) — the
+// standard NSCA-recommended sequence, since exercises performed earlier in a
+// session get maximal neuromuscular output while fatigue degrades whatever
+// comes later (Sforzo & Touey, 1996; NSCA guidelines). Cardio always goes
+// last regardless, since it doesn't compete for the same fresh-effort budget
+// resistance work does. Superset/giant-set groups are moved as a single
+// intact unit so their adjacency (and the "perform back-to-back" pairing)
+// isn't broken by reordering.
+function orderExercisesByEvidence(exercises){
+  const seen = new Set();
+  const units = [];
+  exercises.forEach(ex=>{
+    if(seen.has(ex)) return;
+    if(ex.supersetGroup){
+      const group = exercises.filter(e=> e.supersetGroup===ex.supersetGroup);
+      group.forEach(g=>seen.add(g));
+      units.push({items:group, isConditioning:false, isCompound: group.some(g=>isCompoundExercise(g.name))});
+    } else {
+      seen.add(ex);
+      units.push({items:[ex], isConditioning: ex.muscle==='Conditioning', isCompound: isCompoundExercise(ex.name)});
+    }
+  });
+  units.forEach((u,i)=> u._i=i); // preserve relative order within the same category (stable sort)
+  units.sort((a,b)=>{
+    if(a.isConditioning!==b.isConditioning) return a.isConditioning ? 1 : -1;
+    if(a.isCompound!==b.isCompound) return a.isCompound ? -1 : 1;
+    return a._i - b._i;
+  });
+  return units.flatMap(u=>u.items);
+}
+
 function buildProgram(p){
   const days = parseInt(p.daysPerWeek)||3;
   const lib = EX[p.equipment] || EX.gym;
@@ -1188,7 +1227,8 @@ function buildProgram(p){
     }));
     return { name: day.name, exercises };
   });
-  programDays.forEach(day=> assignTrainingTechniques(day.exercises, p));
+programDays.forEach(day=> assignTrainingTechniques(day.exercises, p));
+programDays.forEach(day=> { day.exercises = orderExercisesByEvidence(day.exercises); });
   applyCardioToProgram(programDays, p, bodyMods);
   return programDays.map(day => ({...day, ...buildSessionWarmupCooldown(day.exercises)}));
 }
@@ -2174,6 +2214,23 @@ function renderOnboarding(){
       grid.appendChild(opt);
     });
     card.appendChild(grid);
+
+    card.appendChild(el(`<div class="chalk-rule my-4"></div>`));
+    card.appendChild(el(`<div class="label mb-1">Priority Areas (optional)</div>`));
+    card.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-3">Anything you specifically want to bring up or feel is lagging? Pick as many or as few as you like — this is entirely optional. Whatever you pick gets trained earlier in each session, while you're freshest.</p>`));
+    const priorityGrid = el(`<div class="grid grid-cols-2 sm:grid-cols-3 gap-2"></div>`);
+    PRIORITY_MUSCLE_OPTIONS.forEach(opt=>{
+      const active = (p.priorityMuscles||[]).includes(opt.key);
+      const btn = el(`<button class="text-sm px-3 py-2.5 rounded-lg border ${active?'border-[var(--chalk)] bg-[var(--bg-2)]':'border-[var(--line)]'} transition ${active?'text-[var(--chalk)]':''}">${opt.label}</button>`);
+      btn.onclick = ()=>{
+        if(!Array.isArray(p.priorityMuscles)) p.priorityMuscles=[];
+        if(p.priorityMuscles.includes(opt.key)) p.priorityMuscles = p.priorityMuscles.filter(k=>k!==opt.key);
+        else p.priorityMuscles.push(opt.key);
+        render();
+      };
+      priorityGrid.appendChild(btn);
+    });
+    card.appendChild(priorityGrid);
   }
   else if(state.step===4){
     card.appendChild(el(`<h2 class="font-display text-xl mb-4">Work & Activity</h2>`));
