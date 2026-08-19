@@ -441,10 +441,13 @@ function ensureProgramWarmupCooldown(){
 // have manually fine-tuned via Edit Program.
 function ensureProgramCardio(){
   if(!Array.isArray(state.program) || state.program.length===0) return;
+  const hasEmbeddedHiit = state.program.some(day=> (day.exercises||[]).some(ex=> ex.muscle==='Conditioning' && /HIIT/.test(ex.name)));
+  const goalsList = (Array.isArray(state.profile.goals) && state.profile.goals.length) ? state.profile.goals : (state.profile.goal ? [state.profile.goal] : []);
+  const needsHiitRemoved = goalsList.includes('strength') && hasEmbeddedHiit;
   const alreadyTailored = state.program.some(day=>
     (day.exercises||[]).some(ex=> ex.muscle==='Conditioning' && /HIIT|LISS/.test(ex.name))
   );
-  if(alreadyTailored) return;
+  if(alreadyTailored && !needsHiitRemoved) return;
   state.program.forEach(day=>{
     day.exercises = (day.exercises||[]).filter(ex=> ex.muscle!=='Conditioning');
   });
@@ -841,8 +844,16 @@ function goalsLabel(goals){
 }
 // Effective calorie key for the current profile, blending across every
 // selected goal (with a fallback to the legacy single-goal field for any
-// client whose data predates multi-select).
+// client whose data predates multi-select). When a completed photo/physique
+// comparison exists with a clear phase recommendation, that takes priority
+// over the plain goal selection — it's based on actual body-fat data, a more
+// specific signal than a general goal choice made during onboarding, and the
+// two should never visibly disagree with each other in the app.
 function profileCalorieKey(profile){
+  const analysis = state.analysis && state.analysis.baseline;
+  if(analysis && analysis.status==='done' && analysis.result && analysis.result.recommendedCalorieKey){
+    return analysis.result.recommendedCalorieKey;
+  }
   const goalsList = (Array.isArray(profile.goals) && profile.goals.length) ? profile.goals : (profile.goal ? [profile.goal] : []);
   return goalsToCalorieKey(goalsList);
 }
@@ -1110,7 +1121,19 @@ function computeCardioPrescription(profile, bodyMods){
     sessions.push({type:'HIIT', minutes:hiitMinutes});
     for(let i=0;i<lissCount;i++){ sessions.push({type:'LISS', minutes:perLiss}); }
   }
-  return {weeklyMinutes, sessions};
+
+  // For strength-focused clients specifically, genuinely strenuous HIIT is
+  // kept off the same day as heavy lifting — research on the interference
+  // effect consistently shows same-session combination measurably blunts
+  // power/explosive strength output even with correct RT-first ordering, and
+  // separating by hours or a full day meaningfully reduces that (Docherty &
+  // Sporer 2000; Lee et al. 2020). LISS isn't the strenuous modality this
+  // concern applies to, so it still distributes as a same-day finisher.
+  const keepHiitSeparate = goalsList.includes('strength');
+  const sameDaySessions = keepHiitSeparate ? sessions.filter(s=>s.type!=='HIIT') : sessions;
+  const separateDaySessions = keepHiitSeparate ? sessions.filter(s=>s.type==='HIIT') : [];
+
+  return {weeklyMinutes, sessions: sameDaySessions, separateDaySessions};
 }
 function buildCardioFinisher(session){
   if(session.type==='HIIT'){
@@ -1120,6 +1143,13 @@ function buildCardioFinisher(session){
 }
 // Spreads cardio sessions evenly across the week's resistance days (rather
 // than bunching them on the first few), then attaches each as a finisher.
+// For strength-focused clients specifically, genuinely strenuous HIIT is kept
+// off the same day as heavy lifting entirely — research on the interference
+// effect consistently shows same-session combination measurably blunts
+// power/explosive strength output even when order is correct (RT-first),
+// and separating by hours or a full day meaningfully reduces that (Docherty &
+// Sporer 2000; Lee et al. 2020). This concern is specific to strenuous
+// intervals, not gentle steady-state, so LISS still distributes normally.
 function applyCardioToProgram(days, profile, bodyMods){
   const cardio = computeCardioPrescription(profile, bodyMods);
   if(!days.length || !cardio.sessions.length) return cardio;
@@ -1299,22 +1329,60 @@ function roundToPlate(kg){
   const increment = kg<20 ? 1 : (kg<60 ? 2.5 : 5);
   return Math.round(kg/increment)*increment;
 }
-// Warm-up sets ramp up toward the working weight before the working sets
-// begin — a widely-used, evidence-informed approach (NSCA/ACSM guidance) to
-// prepare the neuromuscular system and joints for heavier compound lifts in
-// particular. Isolation work carries less injury/fatigue risk so needs less
-// ramp-up. Uses the client's actual suggested working weight when they have
-// logged history for this exercise — otherwise gives percentage guidance
-// rather than fabricated numbers, and fills in real weights automatically
-// once they've logged at least one session.
-function computeWarmupSets(exercise, workingWeightKg){
+// Rough expected-RPE at each warm-up intensity — used to judge whether a
+// warm-up set felt easier or harder than a typical day, and adjust the next
+// suggestion accordingly. This is genuine RPE-based autoregulation (in the
+// spirit of Tuchscherer-style RPE programming and APRE methodology) rather
+// than a rigid fixed-percentage script that ignores how the day actually feels.
+function expectedWarmupRpe(pct){
+  if(pct<=45) return 2.5;
+  if(pct<=65) return 4.5;
+  if(pct<=85) return 6.5;
+  return 8;
+}
+function warmupScheme(exercise){
   if(exercise.muscle === 'Conditioning') return [];
   if(/hold|plank|wall sit/i.test(exercise.name) || /min/i.test(exercise.repRange||'')) return [];
   const compound = isCompoundExercise(exercise.name);
-  const scheme = compound
+  return compound
     ? [{pct:40, reps:'8-10'}, {pct:60, reps:'5'}, {pct:80, reps:'2-3'}]
     : [{pct:50, reps:'10-12'}];
-  return scheme.map(s=> ({...s, weightKg: workingWeightKg ? roundToPlate(workingWeightKg * s.pct/100) : null}));
+}
+// Suggested weight for warm-up set `index`, nudged from the fixed percentage
+// baseline by how the PRIOR logged warm-up set actually felt this session —
+// if it felt harder than expected, the next jump is smaller; if easier, the
+// ramp can continue as planned or slightly faster.
+function suggestWarmupWeight(exercise, workingWeightKg, index, loggedSets){
+  const scheme = warmupScheme(exercise);
+  if(index>=scheme.length || !workingWeightKg) return null;
+  let adjustment = 1;
+  for(let i=index-1; i>=0; i--){
+    const s = loggedSets[i];
+    if(s && s.done && s.rpe!==''){
+      const actualRpe = parseFloat(s.rpe);
+      if(!isNaN(actualRpe)){
+        const diff = actualRpe - expectedWarmupRpe(scheme[i].pct);
+        adjustment = Math.max(0.85, Math.min(1.08, 1 - diff*0.035));
+      }
+      break;
+    }
+  }
+  return roundToPlate(workingWeightKg * scheme[index].pct/100 * adjustment);
+}
+// Once the final (heaviest) warm-up set is logged, this gives an
+// autoregulated working-weight suggestion for TODAY specifically — adjusted
+// from the historical suggestion based on how that last warm-up set actually
+// felt, so the client has a genuine answer by the time working sets start.
+function autoregulateWorkingWeight(workingWeightKg, exercise, loggedSets){
+  const scheme = warmupScheme(exercise);
+  if(!scheme.length || !workingWeightKg) return workingWeightKg;
+  const last = loggedSets[scheme.length-1];
+  if(!last || !last.done || last.rpe==='') return workingWeightKg;
+  const actualRpe = parseFloat(last.rpe);
+  if(isNaN(actualRpe)) return workingWeightKg;
+  const diff = actualRpe - expectedWarmupRpe(scheme[scheme.length-1].pct);
+  const adjustment = Math.max(0.9, Math.min(1.05, 1 - diff*0.03));
+  return roundToPlate(workingWeightKg * adjustment);
 }
 /* ============================= TRAINING TECHNIQUES ============================= */
 // Advanced intensity/structuring techniques, applied only where evidence and
@@ -1422,7 +1490,13 @@ function suggestNextWeight(dayName, exerciseName, repRange){
     .filter(w=>w.dayName===dayName && w.exercises[exerciseName])
     .sort((a,b)=> a.date < b.date ? 1 : -1);
   if(entries.length===0) return null;
-  const lastSets = entries[0].exercises[exerciseName].filter(s=>s.done && s.weight);
+  // Skip entries with no completed sets yet — e.g. today's session gets
+  // auto-initialized with empty placeholder sets the moment the page renders,
+  // even before anything's actually logged, which would otherwise shadow the
+  // last real session and silently break the suggestion for the whole day.
+  const usableEntry = entries.find(e => e.exercises[exerciseName].some(s=>s.done && s.weight));
+  if(!usableEntry) return null;
+  const lastSets = usableEntry.exercises[exerciseName].filter(s=>s.done && s.weight);
   if(lastSets.length===0) return null;
   const avgRpe = lastSets.reduce((s,x)=>s+(parseFloat(x.rpe)||8),0)/lastSets.length;
   const avgReps = lastSets.reduce((s,x)=>s+(parseFloat(x.reps)||0),0)/lastSets.length;
@@ -2963,6 +3037,17 @@ function renderWorkoutView(){
       if(lissCount) parts.push(`${lissCount} steady-state`);
       wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-4">Includes ~${totalMin} min/week of cardio (${parts.join(' + ')}), tailored to your goal and physique data — placed after lifting on the relevant days to minimize interference with strength.</p>`));
     }
+    const goalsListForCardio = (Array.isArray(state.profile.goals) && state.profile.goals.length) ? state.profile.goals : (state.profile.goal ? [state.profile.goal] : []);
+    if(goalsListForCardio.includes('strength')){
+      const bodyModsForCardio = applyBodyTypeModifiers(state.profile.bodyType);
+      const cardioRx = computeCardioPrescription(state.profile, bodyModsForCardio);
+      if(cardioRx.separateDaySessions && cardioRx.separateDaySessions.length){
+        const hiitSession = cardioRx.separateDaySessions[0];
+        const banner = el(`<div class="p-3 rounded-lg mb-4" style="background:var(--bg-2); border:1px solid var(--chalk-dim);"></div>`);
+        banner.appendChild(el(`<div class="text-sm" style="color:var(--chalk);">⚡ Weekly HIIT session (~${hiitSession.minutes} min): schedule this on a day you're not lifting, or at least several hours away from a session — with a strength focus, genuinely strenuous intervals on the same day as heavy lifting can measurably blunt power output, even done after lifting.</div>`));
+        wrap.appendChild(banner);
+      }
+    }
   }
   if(!workoutEditMode && state.profile.injuries){
     const injuryKw = injuryKeywordsFrom(state.profile.injuries);
@@ -3048,9 +3133,10 @@ function renderWorkoutView(){
 
   const dateKey = `${day.name}-${todayISO()}`;
   if(!state.logs.workouts[dateKey]){
-    state.logs.workouts[dateKey] = {date:todayISO(), dayName:day.name, exercises:{}};
+    state.logs.workouts[dateKey] = {date:todayISO(), dayName:day.name, exercises:{}, warmups:{}};
   }
   const sessionLog = state.logs.workouts[dateKey];
+  if(!sessionLog.warmups) sessionLog.warmups = {};
 
   let totalSets=0, doneSets=0;
   day.exercises.forEach(ex=>{
@@ -3141,18 +3227,48 @@ function renderExerciseCard(day, ex, sessionLog, insideGroup){
   }
 
   const workingWeightKg = suggestion ? parseFloat(suggestion.suggested) : null;
-  const warmupSets = computeWarmupSets(ex, workingWeightKg);
-  if(warmupSets.length){
+  const wuScheme = warmupScheme(ex);
+  if(wuScheme.length){
+    if(!sessionLog.warmups[ex.name]){
+      sessionLog.warmups[ex.name] = Array.from({length:wuScheme.length}, ()=>({weight:'',reps:'',rpe:'',done:false}));
+    }
+    const wuSets = sessionLog.warmups[ex.name];
     const wuCard = el(`<div class="mb-3 p-3 rounded-lg" style="background:var(--bg-2);"></div>`);
     wuCard.appendChild(el(`<div class="label mb-1.5">Warm-Up Sets</div>`));
-    const wuList = el(`<div class="text-xs font-mono text-[var(--ink-1)] space-y-0.5"></div>`);
-    warmupSets.forEach((ws,i)=>{
-      const weightText = ws.weightKg!=null ? `${toDisplayWeight(ws.weightKg, unit)}${unit}` : `~${ws.pct}% of working weight`;
-      wuList.appendChild(el(`<div>Set ${i+1}: ${weightText} × ${ws.reps} reps</div>`));
-    });
-    wuCard.appendChild(wuList);
     if(!workingWeightKg){
-      wuCard.appendChild(el(`<div class="text-[10px] text-[var(--ink-2)] mt-1">Log a working set below first — exact warm-up weights will show up automatically after that.</div>`));
+      wuCard.appendChild(el(`<div class="text-xs text-[var(--ink-2)] mb-2">No working-weight history yet for this exercise — log today's sets by feel, and exact suggestions will show up automatically from next time.</div>`));
+    }
+    const wuTable = el(`<div class="space-y-1.5"></div>`);
+    const wuHeader = el(`<div class="grid grid-cols-12 gap-1.5 text-[10px] label px-1"><div class="col-span-1">Set</div><div class="col-span-4">Wt (${unit})</div><div class="col-span-3">Reps</div><div class="col-span-2">RPE</div><div class="col-span-2">Done</div></div>`);
+    wuTable.appendChild(wuHeader);
+    wuSets.forEach((s,idx)=>{
+      const suggested = suggestWarmupWeight(ex, workingWeightKg, idx, wuSets);
+      const row = el(`<div class="set-row grid grid-cols-12 gap-1.5 items-center border border-[var(--line)] rounded-lg px-1 py-1 ${s.done?'done':''}"></div>`);
+      row.appendChild(el(`<div class="col-span-1 text-center font-mono text-xs">${idx+1}</div>`));
+      const placeholder = suggested!=null ? `${toDisplayWeight(suggested, unit)}` : `~${wuScheme[idx].pct}%`;
+      const wIn = el(`<input type="number" value="${s.weight?toDisplayWeight(s.weight, unit):''}" placeholder="${placeholder}" class="col-span-4 !py-1.5 text-sm">`);
+      wIn.oninput = (e)=>{ s.weight=toStorageWeightKg(e.target.value, unit); queueSave(); };
+      const rIn = el(`<input type="number" value="${s.reps}" placeholder="${wuScheme[idx].reps}" class="col-span-3 !py-1.5 text-sm">`);
+      rIn.oninput = (e)=>{ s.reps=e.target.value; queueSave(); };
+      const pIn = el(`<input type="number" step="0.5" min="1" max="10" value="${s.rpe}" class="col-span-2 !py-1.5 text-sm">`);
+      pIn.oninput = (e)=>{ s.rpe=e.target.value; queueSave(); };
+      row.appendChild(wIn); row.appendChild(rIn); row.appendChild(pIn);
+      const doneBtn = el(`<button class="col-span-2 font-mono text-xs py-1.5 rounded ${s.done?'bg-[var(--ok)] text-[#111]':'btn-ghost'}">${s.done?'✓':'Log'}</button>`);
+      doneBtn.onclick = ()=>{
+        if(!s.done && !s.weight && suggested!=null){ s.weight = suggested; } // fill in the suggestion if they didn't type their own
+        s.done = !s.done;
+        queueSave(); render();
+      };
+      row.appendChild(doneBtn);
+      wuTable.appendChild(row);
+    });
+    wuCard.appendChild(wuTable);
+
+    const allWarmupsDone = wuSets.every(s=>s.done);
+    if(allWarmupsDone && workingWeightKg){
+      const todaysWeight = autoregulateWorkingWeight(workingWeightKg, ex, wuSets);
+      const changed = todaysWeight !== workingWeightKg;
+      wuCard.appendChild(el(`<div class="text-xs font-mono mt-2" style="color:var(--chalk);">Based on today's warm-up: work at ${toDisplayWeight(todaysWeight, unit)}${unit}${changed ? ` (adjusted from the usual ${toDisplayWeight(workingWeightKg, unit)}${unit} based on how that last warm-up set felt)` : ''}.</div>`));
     }
     card.appendChild(wuCard);
   }
@@ -3448,16 +3564,25 @@ function mealTemplateBlocked(tpl, restricted, disliked){
 // target genuinely exceeds what's realistic, the meal will land a bit under
 // its macro target rather than producing an unrealistic portion.
 const FOOD_MAX_GRAMS = {
-  'Rice, cooked, white':220, 'Brown rice, cooked':220, 'Pasta, cooked':220,
-  'Couscous, cooked':200, 'Noodles, cooked':220, 'Quinoa, cooked':200,
-  'Oats, dry':100, 'Potato, boiled':350, 'Sweet potato, cooked':350,
-  'Wholemeal bread':150, 'Granola':90, 'Rice cakes':60,
-  'Chicken breast, cooked':280, 'Chicken thigh, cooked':280, 'Salmon, cooked':280,
-  'Lean beef mince 5%':280, 'Turkey mince, breast':280, 'Tofu, firm':300,
-  'Greek yoghurt, plain 0%':350, 'Cottage cheese, low fat':300,
-  'Tuna, canned in water':250, 'Egg, whole, boiled':240
+  'Rice, cooked, white':180, 'Brown rice, cooked':180, 'Pasta, cooked':180,
+  'Couscous, cooked':170, 'Noodles, cooked':180, 'Quinoa, cooked':170,
+  'Oats, dry':90, 'Potato, boiled':300, 'Sweet potato, cooked':300,
+  'Wholemeal bread':150, 'Granola':80, 'Rice cakes':60,
+  'Chicken breast, cooked':250, 'Chicken thigh, cooked':250, 'Salmon, cooked':250,
+  'Lean beef mince 5%':250, 'Turkey mince, breast':250, 'Tofu, firm':280,
+  'Greek yoghurt, plain 0%':300, 'Cottage cheese, low fat':280,
+  'Tuna, canned in water':220, 'Egg, whole, boiled':200
 };
-function maxRealisticGrams(foodName){ return FOOD_MAX_GRAMS[foodName] || 400; }
+function maxRealisticGrams(foodName){ return FOOD_MAX_GRAMS[foodName] || 350; }
+// How each fixed-extra ingredient should be labeled — most aren't "cooked" in
+// any meaningful sense (a drizzle of honey, a splash of milk, raw almonds),
+// so this maps each one individually instead of defaulting everything to cooked.
+const FIXED_EXTRA_WEIGHT_TYPE = {
+  'Almonds':'raw', 'Banana':'raw', 'Mixed berries':'raw', 'Spinach':'raw',
+  'Broccoli':'cooked', 'Green beans':'cooked', 'Peppers':'cooked',
+  'Butter':'as prepared', 'Honey':'as prepared', 'Olive oil':'as prepared', 'Peanut butter':'as prepared',
+  'Milk, semi-skimmed':'as poured'
+};
 function scaleMealTemplate(tpl, targetCals, targetProtein, targetCarbs){
   const ingredients = [];
   let runningProtein = 0, runningCarbs = 0, runningFat = 0, runningCals = 0;
@@ -3466,7 +3591,7 @@ function scaleMealTemplate(tpl, targetCals, targetProtein, targetCarbs){
     const food = foodByName(extra.food);
     if(!food) return;
     const m = scaleMacros(food.per100, extra.grams);
-    ingredients.push({item:extra.food, grams:Math.round(extra.grams), weightType:'cooked'});
+    ingredients.push({item:extra.food, grams:Math.round(extra.grams), weightType: FIXED_EXTRA_WEIGHT_TYPE[extra.food] || 'as prepared'});
     runningCals+=m.cals; runningProtein+=m.protein; runningCarbs+=m.carbs; runningFat+=m.fat;
   });
   const fixedProtein = runningProtein, fixedCarbs = runningCarbs;
@@ -3699,7 +3824,15 @@ function renderNutrition(){
     wrap.appendChild(el(`<div class="mb-3"></div>`));
   }
   if(state.analysis.baseline.status==='done' && state.analysis.baseline.result && state.analysis.baseline.result.nutritionRecommendation){
-    wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-6"><span style="color:var(--chalk);">From your photo comparison:</span> ${state.analysis.baseline.result.nutritionRecommendation} <a href="#" onclick="setView('photos'); return false;" class="underline">See full analysis →</a></p>`));
+    const goalBasedKey = goalsToCalorieKey((Array.isArray(state.profile.goals)&&state.profile.goals.length)?state.profile.goals:(state.profile.goal?[state.profile.goal]:[]));
+    const analysisKey = state.analysis.baseline.result.recommendedCalorieKey;
+    const overriding = analysisKey && analysisKey!==goalBasedKey;
+    wrap.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-2"><span style="color:var(--chalk);">From your photo comparison:</span> ${state.analysis.baseline.result.nutritionRecommendation} <a href="#" onclick="setView('photos'); return false;" class="underline">See full analysis →</a></p>`));
+    if(overriding){
+      wrap.appendChild(el(`<p class="text-xs mb-6" style="color:var(--chalk);">Your target below is set to <b>${analysisKey}</b> based on this — that takes priority over your general goal selection, since it's based on your actual body-fat comparison rather than just a stated goal.</p>`));
+    } else {
+      wrap.appendChild(el(`<div class="mb-6"></div>`));
+    }
   } else {
     wrap.appendChild(el(`<div class="mb-6"></div>`));
   }
@@ -5077,6 +5210,7 @@ function computePhysiqueGapAnalysis(profile){
 
   let keyDifferences = '', nutritionRecommendation = '', trainingFocus = '';
   let suggestedCalorieAdjustment = 0;
+  let recommendedCalorieKey = null; // null = no clear signal yet, don't override the goal-based default
   const timeframeParts = [];
 
   if(current && target){
@@ -5091,14 +5225,17 @@ function computePhysiqueGapAnalysis(profile){
       timeframeParts.push(`roughly ${weeks} weeks of a moderate calorie deficit (about ${fatToLoseKg}kg of fat to lose, at a sustainable ~0.5-0.75% of bodyweight per week)`);
       nutritionRecommendation = 'This points to a fat-loss phase: a moderate calorie deficit with higher relative protein to preserve muscle while leaning out.';
       suggestedCalorieAdjustment = -150;
+      recommendedCalorieKey = 'cutting';
     } else if(gap < -1.5){
       keyDifferences = `Your target sits at a similar or slightly higher body fat than your current estimate — the main gap is more about building muscle size than losing fat.`;
       nutritionRecommendation = 'This points toward a lean muscle-building phase: a modest calorie surplus with high protein, rather than a deficit.';
       suggestedCalorieAdjustment = 100;
+      recommendedCalorieKey = 'bulking';
     } else {
       keyDifferences = `Your estimated body fat is already close to your target range — the main gap is likely more about muscle shape and size than fat loss.`;
       nutritionRecommendation = 'A body recomposition approach (calories close to maintenance, high protein, consistent training) fits well here.';
       suggestedCalorieAdjustment = 0;
+      recommendedCalorieKey = 'maintenance';
     }
   }
 
@@ -5111,7 +5248,7 @@ function computePhysiqueGapAnalysis(profile){
     ? `Realistically: ${timeframeParts.join('; and separately, ')}. This assumes consistent training and nutrition — it's a guide, not a guarantee.`
     : 'Add a target body fat % or physique style, plus your own weight, for a timeframe estimate.';
 
-  return {clientAppraisal, targetAppraisal, keyDifferences, nutritionRecommendation, suggestedCalorieAdjustment, trainingFocus, timeframe};
+  return {clientAppraisal, targetAppraisal, keyDifferences, nutritionRecommendation, suggestedCalorieAdjustment, recommendedCalorieKey, trainingFocus, timeframe};
 }
 
 function runBaselineAnalysis(){
