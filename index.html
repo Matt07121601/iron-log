@@ -224,8 +224,12 @@ let state = {
     workouts:{},      // key: 'dayName-YYYY-MM-DD' -> {date, dayName, exercises:{exName:[{weight,reps,rpe,done}]}}
     bodyweight:[],    // [{date, weightKg}]
     heartRate:[],     // [{id, date, bpm, context:'resting'|'post-workout'|'live-session', source:'manual'|'bluetooth', maxBpm?, durationSec?}]
+    readiness:[],     // [{date, hrv, sleepScore, bodyBattery, stress}] — one entry per day, whatever the client's wearable shows
     food:{}           // key: YYYY-MM-DD -> [{name,cals,protein,carbs,fat}]
-  }
+  },
+  readinessSkippedDate:'',      // if set to today, don't show the check-in prompt again today
+  todayAdjustment:null,         // computed once per day from the readiness check-in
+  showingReadinessExplanation:false,
 };
 
 let saveTimeout = null;
@@ -239,7 +243,8 @@ async function saveAll(){
     await window.storage.set(clientDataKey(session.clientId), JSON.stringify({
       profile:state.profile, program:state.program, targets:state.targets,
       analysis:state.analysis, onboarded:state.onboarded, photos:state.photos,
-      logs:state.logs, notifications:state.notifications, mealPlan:state.mealPlan
+      logs:state.logs, notifications:state.notifications, mealPlan:state.mealPlan,
+      readinessSkippedDate:state.readinessSkippedDate, todayAdjustment:state.todayAdjustment, showingReadinessExplanation:state.showingReadinessExplanation
     }), true);
   }catch(e){ console.error('Save failed', e); }
 }
@@ -308,7 +313,8 @@ function freshClientState(){
     program:null, targets:null, view:'dashboard', activeDayIndex:0,
     quoteQueue:[], showingQuoteFor:null,
     foodSearch:{mode:'search', query:'', results:[], selected:null, qty:100, scanError:null, usedFallback:false},
-    logs:{workouts:{}, bodyweight:[], heartRate:[], food:{}}
+    logs:{workouts:{}, bodyweight:[], heartRate:[], readiness:[], food:{}},
+    readinessSkippedDate:'', todayAdjustment:null, showingReadinessExplanation:false
   };
 }
 async function loadClientState(id){
@@ -320,6 +326,8 @@ async function loadClientState(id){
   normalizeClientPhotosAndAnalysis();
   normalizeProgramRestTimes();
   ensureProgramCardio();
+  ensurePriorityMuscles();
+  ensureReadinessLog();
   ensureProgramTechniques();
   ensureProgramWarmupCooldown();
   ensureProgramStartDate();
@@ -329,7 +337,6 @@ async function loadClientState(id){
   ensureMealPlanFields();
   ensureTargetSpec();
   ensureHeartRateLog();
-  ensurePriorityMuscles();
   queueSave();
 }
 // Existing clients won't have a programStartDate saved (added alongside the
@@ -393,6 +400,12 @@ function ensureHeartRateLog(){
 function ensurePriorityMuscles(){
   if(!Array.isArray(state.profile.priorityMuscles)) state.profile.priorityMuscles = [];
 }
+function ensureReadinessLog(){
+  if(!Array.isArray(state.logs.readiness)) state.logs.readiness = [];
+  if(typeof state.readinessSkippedDate!=='string') state.readinessSkippedDate = '';
+  if(state.todayAdjustment===undefined) state.todayAdjustment = null;
+  if(typeof state.showingReadinessExplanation!=='boolean') state.showingReadinessExplanation = false;
+}
 // Existing clients already have a saved program with rest times generated under
 // the old uniform-per-day scheme. Recompute every exercise's rest time using the
 // current compound/isolation rule, so existing clients get the update too, not
@@ -451,7 +464,7 @@ function ensureProgramTechniques(){
   const alreadyAssigned = state.program.some(day=> (day.exercises||[]).some(ex=> ex.technique));
   if(alreadyAssigned) return;
   state.program.forEach(day=> assignTrainingTechniques(day.exercises, state.profile));
-  state.program.forEach(day=> { day.exercises = orderExercisesByEvidence(day.exercises); });
+  state.program.forEach(day=> { day.exercises = orderExercisesByEvidence(day.exercises, priorityMuscleTags(state.profile.priorityMuscles)); });
 }
 // Migrates any client saved before the baseline/target/check-in photo redesign
 // (old shape: photos:{front,side,rear,target}, analysis:{status,result}) into the
@@ -1017,7 +1030,7 @@ function buildEquipmentEquivalentDay(day, targetEquipment){
     // reset to straight sets for an improvised substitute session.
     return {...ex, name:chosen.n, muscle:chosen.m, technique:'straight', supersetGroup:undefined};
   });
-  const ordered = orderExercisesByEvidence(substituted);
+  const ordered = orderExercisesByEvidence(substituted, priorityMuscleTags(state.profile.priorityMuscles));
   const wc = buildSessionWarmupCooldown(ordered);
   return {name:day.name, exercises:ordered, warmup:wc.warmup, cooldown:wc.cooldown};
 }
@@ -1153,7 +1166,15 @@ function isExerciseExcludedForInjuries(exerciseName, injuryKeywords){
 // resistance work does. Superset/giant-set groups are moved as a single
 // intact unit so their adjacency (and the "perform back-to-back" pairing)
 // isn't broken by reordering.
-function orderExercisesByEvidence(exercises){
+// Compound (multi-joint) exercises before isolation (single-joint) is the
+// standard default — but per Spineti et al. (2010), whichever exercise a
+// client specifically prioritizes should come first in the session
+// *regardless* of whether it's a compound or isolation movement, since
+// exercise order affects strength/volume gains more by priority than by
+// muscle-group size. priorityTags (optional) take precedence over the
+// compound/isolation split; conditioning (cardio) always goes last either way.
+function orderExercisesByEvidence(exercises, priorityTags){
+  const tags = priorityTags || [];
   const seen = new Set();
   const units = [];
   exercises.forEach(ex=>{
@@ -1161,15 +1182,16 @@ function orderExercisesByEvidence(exercises){
     if(ex.supersetGroup){
       const group = exercises.filter(e=> e.supersetGroup===ex.supersetGroup);
       group.forEach(g=>seen.add(g));
-      units.push({items:group, isConditioning:false, isCompound: group.some(g=>isCompoundExercise(g.name))});
+      units.push({items:group, isConditioning:false, isCompound: group.some(g=>isCompoundExercise(g.name)), isPriority: group.some(g=>tags.includes(g.muscle))});
     } else {
       seen.add(ex);
-      units.push({items:[ex], isConditioning: ex.muscle==='Conditioning', isCompound: isCompoundExercise(ex.name)});
+      units.push({items:[ex], isConditioning: ex.muscle==='Conditioning', isCompound: isCompoundExercise(ex.name), isPriority: tags.includes(ex.muscle)});
     }
   });
   units.forEach((u,i)=> u._i=i); // preserve relative order within the same category (stable sort)
   units.sort((a,b)=>{
     if(a.isConditioning!==b.isConditioning) return a.isConditioning ? 1 : -1;
+    if(a.isPriority!==b.isPriority) return a.isPriority ? -1 : 1;
     if(a.isCompound!==b.isCompound) return a.isCompound ? -1 : 1;
     return a._i - b._i;
   });
@@ -1228,7 +1250,7 @@ function buildProgram(p){
     return { name: day.name, exercises };
   });
 programDays.forEach(day=> assignTrainingTechniques(day.exercises, p));
-programDays.forEach(day=> { day.exercises = orderExercisesByEvidence(day.exercises); });
+programDays.forEach(day=> { day.exercises = orderExercisesByEvidence(day.exercises, priorityMuscleTags(p.priorityMuscles)); });
   applyCardioToProgram(programDays, p, bodyMods);
   return programDays.map(day => ({...day, ...buildSessionWarmupCooldown(day.exercises)}));
 }
@@ -1440,6 +1462,17 @@ function render(){
   if(session.role==='coach' && !session.clientId){ root.appendChild(renderCoachDashboard()); return; }
   if(!state.onboarded){ root.appendChild(renderOnboarding()); return; }
   if(session.role==='client' && !state.profile.gpClearance){ root.appendChild(renderHealthSafetyGate()); return; }
+  if(session.role==='client'){
+    const hasCheckedInToday = state.logs.readiness.some(r=> r.date===todayISO());
+    if(!hasCheckedInToday && state.readinessSkippedDate!==todayISO()){
+      root.appendChild(renderReadinessCheckIn());
+      return;
+    }
+    if(state.showingReadinessExplanation){
+      root.appendChild(renderReadinessExplanation());
+      return;
+    }
+  }
   root.appendChild(renderHeader());
   const content = document.createElement('div');
   content.className='mt-6';
@@ -1970,6 +2003,30 @@ const GOALS = [
   {key:'recomp', label:'Body Recomposition', desc:'Lose fat and build muscle simultaneously at maintenance calories — slower, works best for beginners or returning trainees.'},
   {key:'endurance', label:'Endurance', desc:'Build muscular and cardiovascular stamina using higher reps and shorter rest.'},
 ];
+// User-facing body-part choices, mapped to the internal muscle tags used
+// across the exercise library — some (Back, Shoulders) intentionally cover
+// more than one internal tag so the selection feels natural to a client
+// while still matching correctly against real exercises.
+const PRIORITY_MUSCLE_OPTIONS = [
+  {key:'chest', label:'Chest', tags:['Chest']},
+  {key:'back', label:'Back', tags:['Back','Lats']},
+  {key:'shoulders', label:'Shoulders', tags:['Shoulders','Rear Delts']},
+  {key:'biceps', label:'Biceps', tags:['Biceps']},
+  {key:'triceps', label:'Triceps', tags:['Triceps']},
+  {key:'glutes', label:'Glutes', tags:['Glutes']},
+  {key:'quads', label:'Quads', tags:['Quads']},
+  {key:'hamstrings', label:'Hamstrings', tags:['Hamstrings']},
+  {key:'calves', label:'Calves', tags:['Calves']},
+  {key:'core', label:'Core / Abs', tags:['Core']},
+];
+function priorityMuscleTags(priorityMuscles){
+  const tags = [];
+  (priorityMuscles||[]).forEach(key=>{
+    const opt = PRIORITY_MUSCLE_OPTIONS.find(o=>o.key===key);
+    if(opt) opt.tags.forEach(t=> { if(!tags.includes(t)) tags.push(t); });
+  });
+  return tags;
+}
 // Somatotype is a rough, informal starting-point signal — not a rigid or clinical category.
 // It nudges a handful of program variables (see applyBodyTypeModifiers); logged real-world
 // progress always outweighs it as data accumulates.
@@ -2050,6 +2107,65 @@ function applyExperienceModifiers(level){
 // covers existing clients who onboarded before this feature existed, so the
 // gate genuinely applies to everyone before they see their program/nutrition,
 // not just new signups.
+// Shown once per day, the first time a client opens the app — quick optional
+// numbers from whatever their wearable shows on the home screen. Any field
+// can be left blank; nothing here requires a specific device.
+function renderReadinessCheckIn(){
+  const wrap = el(`<div class="pt-10 max-w-lg mx-auto"></div>`);
+  wrap.appendChild(el(`<div class="mb-6 text-center"><div class="label">Morning Check-In</div><h1 class="font-display text-2xl font-bold mt-1">How's Today Looking?</h1></div>`));
+  const card = el(`<div class="card p-5 sm:p-8"></div>`);
+  card.appendChild(el(`<p class="text-sm text-[var(--ink-2)] mb-5">Whatever your watch or ring shows this morning — leave anything blank you don't have. Today's session and targets adjust automatically based on this.</p>`));
+
+  const draft = {hrv:'', sleepScore:'', bodyBattery:'', stress:''};
+  const grid = el(`<div class="grid grid-cols-2 gap-3 mb-5"></div>`);
+  [['hrv','HRV'],['sleepScore','Sleep Score'],['bodyBattery','Body Battery'],['stress','Stress']].forEach(([key,label])=>{
+    const inp = el(`<input type="number" placeholder="e.g. 65">`);
+    inp.oninput = (e)=> draft[key]=e.target.value;
+    const f = el(`<div></div>`);
+    f.appendChild(el(`<div class="label mb-1.5">${label}</div>`));
+    f.appendChild(inp);
+    grid.appendChild(f);
+  });
+  card.appendChild(grid);
+
+  const submitBtn = el(`<button class="btn btn-chalk px-6 py-3 rounded-lg w-full mb-2">Submit</button>`);
+  submitBtn.onclick = ()=>{
+    const entry = {date:todayISO(), hrv:draft.hrv, sleepScore:draft.sleepScore, bodyBattery:draft.bodyBattery, stress:draft.stress};
+    state.logs.readiness.push(entry);
+    const history = state.logs.readiness.slice(0,-1); // everything except today, for the baseline
+    state.todayAdjustment = computeReadinessAdjustment(history, entry);
+    state.showingReadinessExplanation = true;
+    queueSave(); render();
+  };
+  card.appendChild(submitBtn);
+  const skipBtn = el(`<button class="btn btn-ghost px-6 py-2.5 rounded-lg w-full text-sm">Skip for today</button>`);
+  skipBtn.onclick = ()=>{ state.readinessSkippedDate = todayISO(); render(); };
+  card.appendChild(skipBtn);
+
+  wrap.appendChild(card);
+  return wrap;
+}
+// A short, factual read-out of what changed and why — shown once, right
+// after submitting, before the rest of the app is reachable again.
+function renderReadinessExplanation(){
+  const wrap = el(`<div class="pt-10 max-w-lg mx-auto"></div>`);
+  const adj = state.todayAdjustment;
+  const tierColor = adj && adj.tier==='low' ? 'var(--alert)' : (adj && adj.tier==='reduced' ? 'var(--chalk)' : 'var(--ok)');
+  wrap.appendChild(el(`<div class="mb-6 text-center"><div class="label">Today's Adjustment</div><h1 class="font-display text-2xl font-bold mt-1" style="color:${tierColor};">${adj && adj.status==='done' ? adj.tier.toUpperCase() : 'BASELINE'}</h1></div>`));
+  const card = el(`<div class="card p-5 sm:p-8"></div>`);
+  const text = readinessExplanationText(adj);
+  text.split('\n\n').forEach(block=>{
+    const p = el(`<div class="text-sm text-[var(--ink-1)] mb-3 whitespace-pre-line"></div>`);
+    p.textContent = block;
+    card.appendChild(p);
+  });
+  const continueBtn = el(`<button class="btn btn-chalk px-6 py-3 rounded-lg w-full mt-2">Continue</button>`);
+  continueBtn.onclick = ()=>{ state.showingReadinessExplanation = false; queueSave(); render(); };
+  card.appendChild(continueBtn);
+  wrap.appendChild(card);
+  return wrap;
+}
+
 function renderHealthSafetyGate(){
   const p = state.profile;
   const wrap = el(`<div class="pt-10 max-w-2xl mx-auto"></div>`);
@@ -2529,6 +2645,7 @@ function dismissQuote(){
 
 /* ============================= COACH PROGRAM EDITING ============================= */
 let workoutEditMode = false;
+let diningOutPanelOpen = false;
 let homeAltDayIndex = {}; // dayIndex -> 'home'|'bodyweight'|undefined, "no gym today" toggle, session-only (not persisted)
 function updateProgramField(dayIdx, exIdx, field, value){
   state.program[dayIdx].exercises[exIdx][field] = value;
@@ -2876,7 +2993,13 @@ function renderWorkoutView(){
   const availableTiers = fallbackEquipmentTiers(state.profile.equipment);
   const activeTier = homeAltDayIndex[state.activeDayIndex];
   const usingAlt = !workoutEditMode && activeTier && availableTiers.includes(activeTier);
-  const day = usingAlt ? buildEquipmentEquivalentDay(gymDay, activeTier) : gymDay;
+  const day = applyReadinessToDay(usingAlt ? buildEquipmentEquivalentDay(gymDay, activeTier) : gymDay, state.todayAdjustment);
+
+  if(!workoutEditMode && state.todayAdjustment && state.todayAdjustment.status==='done' && state.todayAdjustment.setMultiplier<1){
+    const banner = el(`<div class="p-3 rounded-lg mb-4" style="background:var(--bg-2); border:1px solid ${state.todayAdjustment.tier==='low'?'var(--alert)':'var(--chalk-dim)'};"></div>`);
+    banner.appendChild(el(`<div class="text-sm" style="color:${state.todayAdjustment.tier==='low'?'var(--alert)':'var(--chalk)'};">⚡ Adjusted for today's recovery — sets and RIR modified below.</div>`));
+    wrap.appendChild(banner);
+  }
 
   const TIER_LABELS = {home:'At-Home (Dumbbells/Bands)', bodyweight:'Bodyweight-Only'};
   const TIER_ICONS = {home:'🏠', bodyweight:'🧘'};
@@ -3121,6 +3244,46 @@ const FOOD_IDEAS = {
   carb:['rice','oats','sweet potato','quinoa','wholemeal bread','banana','berries','potatoes','couscous'],
   fat:['olive oil','almonds','avocado','peanut butter','walnuts','olive oil dressing']
 };
+/* ============================= EATING OUT ============================= */
+// Translates remaining macros into rough hand-portion language — a standard,
+// widely-used practical coaching heuristic (roughly: a palm of protein ≈
+// 25g, a cupped fist of carbs ≈ 30g, a thumb of fat ≈ 8g) for when there's
+// no menu or scale in front of you. Deliberately approximate, not precise.
+function handPortionGuide(remainingProtein, remainingCarbs, remainingFat){
+  const parts = [];
+  if(remainingProtein>10){
+    const n = Math.max(1, Math.round(remainingProtein/25));
+    parts.push(`≈${n} palm${n>1?'s':''} of protein (chicken, fish, tofu, lean beef)`);
+  }
+  if(remainingCarbs>10){
+    const n = Math.max(1, Math.round(remainingCarbs/30));
+    parts.push(`≈${n} cupped fist${n>1?'s':''} of carbs (rice, potato, bread, noodles)`);
+  }
+  if(remainingFat>5){
+    const n = Math.max(1, Math.round(remainingFat/8));
+    parts.push(`≈${n} thumb${n>1?'s':''} of added fat (oil, butter, dressing, cheese)`);
+  }
+  return parts;
+}
+// General, evidence-informed practical guidance for choosing well at a
+// restaurant — not tied to any specific menu, since none is available for
+// free, but genuinely applicable to reading almost any menu.
+const DINING_OUT_TIPS = [
+  'Lead with a clear protein source — helps hit targets and keeps you fuller for longer.',
+  'Ask for sauces and dressings on the side — control how much goes on, rather than avoiding them entirely.',
+  'Grilled, baked, steamed, or roasted over fried or battered where there\'s a choice.',
+  'Swap fries/chips for a side salad, steamed veg, or extra protein if the menu allows substitutions.',
+  'Liquid calories add up fast and quietly — cocktails, sugary mixers, and multiple drinks are often the biggest single swing in a night out.',
+  'Restaurant portions often run 1.5-2x a normal serving — box up half or share if you\'re unsure, rather than default to finishing the plate.',
+  'Don\'t arrive starving — a small high-protein snack beforehand reduces impulsive over-ordering.'
+];
+function diningOutGoalTip(profile){
+  const goalsList = (Array.isArray(profile.goals) && profile.goals.length) ? profile.goals : (profile.goal ? [profile.goal] : []);
+  if(goalsList.includes('fatloss')) return 'Your goal is fat loss — lean toward the protein/veg-forward end of the menu and treat portion size as the main lever tonight.';
+  if(goalsList.includes('muscle')) return 'Your goal is muscle building — the more common mistake eating out on a muscle-building plan is under-eating, not over-eating. Don\'t hold back on the protein portion.';
+  return '';
+}
+
 function suggestMeals(p){
   const dislikes = (p.dietaryDislikes||'').toLowerCase().split(',').map(s=>s.trim()).filter(Boolean);
   const restricted = (p.dietaryRestrictions||'').toLowerCase().split(',').map(s=>s.trim()).filter(Boolean);
@@ -3514,6 +3677,19 @@ function renderNutrition(){
   const deficitPct = Math.round(20*bodyMods.deficitMult);
   const surplusPct = Math.round(12*bodyMods.surplusMult);
 
+  const adj = state.todayAdjustment;
+  if(adj && adj.status==='done' && adj.calorieAdjust!=='none'){
+    const banner = el(`<div class="p-4 rounded-lg mb-4" style="background:var(--bg-2); border:1px solid ${adj.tier==='low'?'var(--alert)':'var(--chalk-dim)'};"></div>`);
+    banner.appendChild(el(`<div class="label mb-1" style="color:${adj.tier==='low'?'var(--alert)':'var(--chalk)'};">Today's Nutrition Adjustment</div>`));
+    if(adj.calorieAdjust==='maintenance'){
+      const maintCals = Math.round(state.targets.maintenance.calories);
+      banner.appendChild(el(`<div class="text-sm text-[var(--ink-1)]">Eat at maintenance today — <b>${maintCals} kcal</b> instead of your usual deficit. Poor recovery isn't the day to add a calorie cut on top.</div>`));
+    } else if(adj.calorieAdjust==='carbs_up'){
+      banner.appendChild(el(`<div class="text-sm text-[var(--ink-1)]">Lean toward the higher end of your carb range today to support recovery — calories stay the same.</div>`));
+    }
+    wrap.appendChild(banner);
+  }
+
   wrap.appendChild(el(`<h2 class="font-display text-2xl font-bold mb-1">Nutrition Targets</h2>`));
   wrap.appendChild(el(`<p class="text-sm text-[var(--ink-2)] mb-2">Based on Mifflin-St Jeor BMR, activity-adjusted TDEE, and ISSN/ACSM protein guidance (1.6–2.2g/kg bodyweight).</p>`));
   if(state.profile.bodyType){
@@ -3796,6 +3972,44 @@ function renderTracker(){
     sGrid.appendChild(c);
   });
   wrap.appendChild(summary);
+
+  const remaining = {cals: t.calories-totals.cals, protein: t.protein.g-totals.protein, carbs: t.carbs.g-totals.carbs, fat: t.fat.g-totals.fat};
+  const diningBtn = el(`<button class="btn btn-ghost px-4 py-2.5 rounded-lg text-sm mb-5">🍽️ Eating Out?</button>`);
+  diningBtn.onclick = ()=>{ diningOutPanelOpen = !diningOutPanelOpen; render(); };
+  wrap.appendChild(diningBtn);
+
+  if(diningOutPanelOpen){
+    const panel = el(`<div class="card p-4 mb-5"></div>`);
+    panel.appendChild(el(`<div class="label mb-2">What You've Got Left Today</div>`));
+    if(remaining.cals<=0){
+      panel.appendChild(el(`<p class="text-sm text-[var(--ink-1)] mb-3">You're already at or past today's target. That's okay — one meal doesn't undo a plan. Use the checklist below to keep the damage sensible and just log it honestly afterward.</p>`));
+    } else {
+      panel.appendChild(el(`<div class="text-sm font-mono text-[var(--ink-1)] mb-2">${Math.round(remaining.cals)} kcal · ${Math.round(remaining.protein)}g protein · ${Math.round(remaining.carbs)}g carbs · ${Math.round(remaining.fat)}g fat</div>`));
+      const portions = handPortionGuide(remaining.protein, remaining.carbs, remaining.fat);
+      if(portions.length){
+        const pList = el(`<ul class="text-sm text-[var(--ink-1)] mb-3 space-y-1 list-disc pl-4"></ul>`);
+        portions.forEach(p=> pList.appendChild(el(`<li>${p}</li>`)));
+        panel.appendChild(pList);
+        panel.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-3">Rough visual guide, not exact — no menu data behind this, just a practical way to picture a plate without weighing anything.</p>`));
+      }
+    }
+
+    const goalTip = diningOutGoalTip(state.profile);
+    if(goalTip){
+      panel.appendChild(el(`<div class="text-xs mb-3 p-2 rounded" style="background:var(--bg-2); color:var(--chalk);">${goalTip}</div>`));
+    }
+
+    panel.appendChild(el(`<div class="label mb-2">Reading Any Menu</div>`));
+    const tipsList = el(`<ul class="text-sm text-[var(--ink-1)] space-y-1.5 list-disc pl-4"></ul>`);
+    DINING_OUT_TIPS.forEach(tip=> tipsList.appendChild(el(`<li>${tip}</li>`)));
+    panel.appendChild(tipsList);
+
+    const logBtn = el(`<button class="btn btn-chalk px-4 py-2.5 rounded-lg text-sm mt-3">Log What You Had →</button>`);
+    logBtn.onclick = ()=>{ diningOutPanelOpen=false; state.foodSearch.mode='search'; render(); };
+    panel.appendChild(logBtn);
+
+    wrap.appendChild(panel);
+  }
 
   const addCard = el(`<div class="card p-4 mb-5"></div>`);
   addCard.appendChild(el(`<div class="label mb-2">Add Food</div>`));
@@ -4727,6 +4941,102 @@ const MUSCLE_TIMEFRAME_BY_EXPERIENCE = {
 // BMI, age and gender. Only used as a fallback when the client hasn't given
 // an actual body fat % or measurements; always flagged as an estimate, since
 // it can be meaningfully off for very muscular or very lean individuals.
+/* ============================= MORNING READINESS ============================= */
+// Readiness-guided training: comparing today's HRV/sleep/recovery against the
+// CLIENT'S OWN rolling baseline, not a fixed population threshold — HRV in
+// particular is highly individual, so "low" only means something relative to
+// a person's own normal range (Kiviniemi et al., Vesterinen et al. on
+// HRV-guided training). Needs a few days of data before it can say anything
+// meaningful, so early check-ins just build the baseline with no adjustment.
+const READINESS_FIELDS = [
+  {key:'hrv', label:'HRV', invert:false},
+  {key:'sleepScore', label:'Sleep Score', invert:false},
+  {key:'bodyBattery', label:'Body Battery', invert:false},
+  {key:'stress', label:'Stress', invert:true} // higher stress is worse, so invert before combining
+];
+function computeReadinessBaseline(history, field, excludeDate){
+  const vals = history
+    .filter(r=> r.date!==excludeDate && r[field]!=null && r[field]!=='')
+    .map(r=> parseFloat(r[field]))
+    .filter(v=> !isNaN(v));
+  const recent = vals.slice(-14);
+  if(recent.length < 3) return null; // not enough history for a meaningful baseline yet
+  return recent.reduce((a,b)=>a+b,0)/recent.length;
+}
+function computeReadinessAdjustment(history, todayEntry){
+  const details = [];
+  const deltas = [];
+  READINESS_FIELDS.forEach(f=>{
+    const todayVal = parseFloat(todayEntry[f.key]);
+    if(isNaN(todayVal)) return;
+    const baseline = computeReadinessBaseline(history, f.key, todayEntry.date);
+    if(baseline==null) return;
+    let pctDelta = (todayVal - baseline) / baseline;
+    if(f.invert) pctDelta = -pctDelta;
+    deltas.push(pctDelta);
+    details.push({label:f.label, today:todayVal, baseline:fmt1(baseline), pctDelta:Math.round(pctDelta*100)});
+  });
+  if(deltas.length===0){
+    return {status:'building_baseline', details:[]};
+  }
+  const avgDeltaPct = Math.round((deltas.reduce((a,b)=>a+b,0)/deltas.length)*100);
+
+  // Volume (sets) is the primary lever adjusted day-to-day in autoregulated
+  // training — lower-risk than asking someone to guess a lighter weight.
+  // RIR buffer widens too, so working sets stop further from failure.
+  let tier, setMultiplier, extraRir, calorieAdjust;
+  if(avgDeltaPct <= -15){
+    tier='low'; setMultiplier=0.6; extraRir=2; calorieAdjust='maintenance';
+  } else if(avgDeltaPct <= -7){
+    tier='reduced'; setMultiplier=0.8; extraRir=1; calorieAdjust='carbs_up';
+  } else if(avgDeltaPct >= 7){
+    tier='good'; setMultiplier=1; extraRir=0; calorieAdjust='none';
+  } else {
+    tier='normal'; setMultiplier=1; extraRir=0; calorieAdjust='none';
+  }
+  return {status:'done', tier, avgDeltaPct, setMultiplier, extraRir, calorieAdjust, details, date:todayEntry.date};
+}
+// Widens an "X-Y" RIR range by a flat amount, e.g. '1-2' + 2 -> '3-4'.
+function adjustRirRange(rirStr, add){
+  if(!add) return rirStr;
+  const nums = (String(rirStr).match(/\d+/g)||[]).map(Number);
+  if(nums.length===0) return rirStr;
+  return nums.map(n=> n+add).join('-');
+}
+// Produces a same-day, non-destructive modified view of a workout day —
+// reduced sets and a wider RIR buffer — without touching the stored program,
+// the same pattern already used for the at-home equipment substitution.
+function applyReadinessToDay(day, adjustment){
+  if(!adjustment || adjustment.status!=='done' || adjustment.setMultiplier>=1) return day;
+  const exercises = day.exercises.map(ex=>{
+    if(ex.muscle==='Conditioning') return ex;
+    return {...ex, sets: Math.max(1, Math.round(ex.sets*adjustment.setMultiplier)), rir: adjustRirRange(ex.rir, adjustment.extraRir)};
+  });
+  return {...day, exercises};
+}
+// A short, factual explanation — real numbers, plain language, no padding.
+function readinessExplanationText(adjustment){
+  if(!adjustment || adjustment.status==='building_baseline'){
+    return "Not enough check-in history yet to compare against — logged today's numbers, no changes made. Usually takes about 3-4 days before adjustments start.";
+  }
+  const lines = [];
+  adjustment.details.forEach(d=>{
+    const sign = d.pctDelta>0 ? '+' : '';
+    lines.push(`${d.label}: ${d.today} (${sign}${d.pctDelta}% vs your recent average of ${d.baseline})`);
+  });
+  let verdict;
+  if(adjustment.tier==='low'){
+    verdict = `Recovery is well below your normal range. Today's session: sets cut by about 40%, stopping 2 reps further from failure than usual. Nutrition: eating at maintenance instead of your usual deficit — today isn't the day to add a calorie cut on top of poor recovery.`;
+  } else if(adjustment.tier==='reduced'){
+    verdict = `Recovery is a bit below your normal range. Today's session: sets trimmed by about 20%, stopping 1 rep further from failure than usual. Nutrition: lean toward the higher end of your carb range today.`;
+  } else if(adjustment.tier==='good'){
+    verdict = `Recovery is above your normal range. No changes — session and targets stay as programmed.`;
+  } else {
+    verdict = `Recovery is within your normal range. No changes — session and targets stay as programmed.`;
+  }
+  return lines.join('\n') + '\n\n' + verdict;
+}
+
 function estimateBodyFatPct(profile){
   if(profile.bodyFatPct) return {value: fmt1(parseFloat(profile.bodyFatPct)), estimated:false};
   const w = parseFloat(profile.weightKg);
