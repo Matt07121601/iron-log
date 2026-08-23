@@ -213,6 +213,7 @@ let state = {
   },
   notifications:[], // [{id, date, title, message, read}]
   coachChatHistory:[], // [{role:'user'|'coach', text}]
+  checkinAdjustmentLog:[], // [{id, date, checkinId, weightDiffKg, changes:[{type,label,oldValue,newValue,reason}]}]
   mealPlan:{status:'idle', result:null, generatedAt:null},
   program:null,
   targets:null,
@@ -246,6 +247,7 @@ async function saveAll(){
       analysis:state.analysis, onboarded:state.onboarded, photos:state.photos,
       logs:state.logs, notifications:state.notifications, mealPlan:state.mealPlan,
       coachChatHistory:state.coachChatHistory, programExplanationSeen:state.programExplanationSeen,
+      checkinAdjustmentLog:state.checkinAdjustmentLog,
       readinessSkippedDate:state.readinessSkippedDate, todayAdjustment:state.todayAdjustment, showingReadinessExplanation:state.showingReadinessExplanation
     }), true);
   }catch(e){ console.error('Save failed', e); }
@@ -312,6 +314,7 @@ function freshClientState(){
     },
     notifications:[],
     coachChatHistory:[],
+    checkinAdjustmentLog:[],
     mealPlan:{status:'idle', result:null, generatedAt:null},
     program:null, targets:null, view:'dashboard', activeDayIndex:0,
     quoteQueue:[], showingQuoteFor:null,
@@ -332,6 +335,7 @@ async function loadClientState(id){
   ensurePriorityMuscles();
   ensureProgramExplanationSeen();
   ensureCoachChatHistory();
+  ensureCheckinAdjustmentLog();
   ensureReadinessLog();
   ensureProgramTechniques();
   ensureProgramWarmupCooldown();
@@ -410,6 +414,9 @@ function ensureProgramExplanationSeen(){
 }
 function ensureCoachChatHistory(){
   if(!Array.isArray(state.coachChatHistory)) state.coachChatHistory = [];
+}
+function ensureCheckinAdjustmentLog(){
+  if(!Array.isArray(state.checkinAdjustmentLog)) state.checkinAdjustmentLog = [];
 }
 function ensureReadinessLog(){
   if(!Array.isArray(state.logs.readiness)) state.logs.readiness = [];
@@ -1409,7 +1416,7 @@ function computePeriodization(profile, dayIndex, asOfDate){
       : `Building — week ${weekInMesocycle} of ${progressiveWeeks} before your next deload`;
   }
   const microcycle = isDeload ? {label:'', repShift:0, rirShift:0} : computeMicrocycle(profile, dayIndex);
-  return {weekNumber, weekInMesocycle, mesocycleLength:mesoLength, mesocycleNumber, isDeload, setMultiplier, rirAdjustment, phaseLabel, microcycle};
+  return {weekNumber, weekInMesocycle, mesocycleLength:mesoLength, mesocycleNumber, isDeload, setMultiplier, rirAdjustment, phaseLabel, microcycle, daysElapsed};
 }
 // Macrocycle: the big-picture view — how many mesocycles have passed, and
 // (when the client has done a physique comparison with a timeframe estimate)
@@ -1684,6 +1691,8 @@ function render(){
   if(state.view==='dashboard') content.appendChild(renderDashboard());
   else if(state.view==='workout') content.appendChild(renderWorkoutView());
   else if(state.view==='profile') content.appendChild(renderProfileView());
+  else if(state.view==='checkinExplanation') content.appendChild(renderCheckinExplanation());
+  else if(state.view==='checkinTimeline') content.appendChild(renderCheckinTimeline());
   else if(state.view==='coach') content.appendChild(renderCoachView());
   else if(state.view==='nutrition') content.appendChild(renderNutrition());
   else if(state.view==='tracker') content.appendChild(renderTracker());
@@ -1806,7 +1815,7 @@ async function submitCode(code){
 function logoutSession(){
   session = {role:null, clientId:null, clientName:null, viewingAsCoach:false};
   gateSubmitError = null; gateSetupError = null; gateError = null;
-  workoutEditMode = false; notificationsOpen = false; showCalendar = false; calendarViewDate = null; mealPlanActiveDay = 0; newCheckinDraft = {front:null, side:null, rear:null, measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'}};
+  workoutEditMode = false; notificationsOpen = false; showCalendar = false; calendarViewDate = null; mealPlanActiveDay = 0; newCheckinDraft = {front:null, side:null, rear:null, weightKg:'', measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'}};
   clearInterval(Timer.interval);
   $('timerBar') && $('timerBar').classList.add('hidden');
   chartInstances.forEach(c=>{ try{ c.destroy(); }catch(e){} });
@@ -1818,7 +1827,7 @@ function coachOpenClient(clientId, name){
   session.clientId = clientId;
   session.clientName = name;
   session.viewingAsCoach = true;
-  checkinStatus = 'idle'; checkinDraft = null; workoutEditMode = false; notificationsOpen = false; showCalendar = false; calendarViewDate = null; mealPlanActiveDay = 0; newCheckinDraft = {front:null, side:null, rear:null, measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'}};
+  checkinStatus = 'idle'; checkinDraft = null; workoutEditMode = false; notificationsOpen = false; showCalendar = false; calendarViewDate = null; mealPlanActiveDay = 0; newCheckinDraft = {front:null, side:null, rear:null, weightKg:'', measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'}};
   gateBusy = true; render();
   loadClientState(clientId).then(()=>{ gateBusy=false; render(); });
 }
@@ -1826,7 +1835,7 @@ function coachBackToDashboard(){
   session.clientId = null;
   session.clientName = null;
   session.viewingAsCoach = false;
-  checkinStatus = 'idle'; checkinDraft = null; workoutEditMode = false; notificationsOpen = false; showCalendar = false; calendarViewDate = null; mealPlanActiveDay = 0; newCheckinDraft = {front:null, side:null, rear:null, measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'}};
+  checkinStatus = 'idle'; checkinDraft = null; workoutEditMode = false; notificationsOpen = false; showCalendar = false; calendarViewDate = null; mealPlanActiveDay = 0; newCheckinDraft = {front:null, side:null, rear:null, weightKg:'', measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'}};
   clearInterval(Timer.interval);
   $('timerBar') && $('timerBar').classList.add('hidden');
   chartInstances.forEach(c=>{ try{ c.destroy(); }catch(e){} });
@@ -1881,6 +1890,62 @@ function summarizeClient(profileData, logs){
     trend, goal: profileData.profile.goal
   };
 }
+/* ============================= CHECK-IN ADJUSTMENT EXPLANATION & LOG ============================= */
+function renderCheckinExplanation(){
+  const wrap = el(`<div class="max-w-2xl mx-auto"></div>`);
+  const backBtn = el(`<button class="text-xs text-[var(--ink-2)] hover:text-[var(--chalk)] mb-4">← Back</button>`);
+  backBtn.onclick = ()=> setView('dashboard');
+  wrap.appendChild(backBtn);
+
+  const logEntry = (state.checkinAdjustmentLog||[]).find(l=> l.id===state.activeCheckinLogId);
+  if(!logEntry){
+    wrap.appendChild(el(`<p class="text-sm text-[var(--ink-2)]">This check-in update couldn't be found — it may have been from before an app update.</p>`));
+    return wrap;
+  }
+
+  wrap.appendChild(el(`<div class="mb-6"><div class="label">Check-In Update</div><h1 class="font-display text-2xl font-bold mt-1">What Changed & Why</h1><p class="text-sm text-[var(--ink-2)] mt-1">From your ${logEntry.date} check-in.</p></div>`));
+
+  logEntry.changes.forEach(change=>{
+    const card = el(`<div class="card p-4 mb-4"></div>`);
+    card.appendChild(el(`<div class="label mb-2" style="color:var(--chalk);">${change.label}</div>`));
+    const compareRow = el(`<div class="flex items-center gap-3 mb-3"></div>`);
+    compareRow.appendChild(el(`<div class="flex-1 text-center p-2 rounded-lg" style="background:var(--bg-2);"><div class="text-[10px] text-[var(--ink-2)] uppercase">Before</div><div class="font-display font-semibold">${change.oldValue}</div></div>`));
+    compareRow.appendChild(el(`<div class="text-[var(--ink-2)]">→</div>`));
+    compareRow.appendChild(el(`<div class="flex-1 text-center p-2 rounded-lg" style="background:var(--bg-2); border:1px solid var(--chalk-dim);"><div class="text-[10px] text-[var(--ink-2)] uppercase">Now</div><div class="font-display font-semibold" style="color:var(--chalk);">${change.newValue}</div></div>`));
+    card.appendChild(compareRow);
+    card.appendChild(el(`<p class="text-sm text-[var(--ink-1)] leading-relaxed">${change.reason}</p>`));
+    wrap.appendChild(card);
+  });
+
+  const timelineBtn = el(`<button class="btn btn-ghost text-xs px-3 py-2 rounded-lg w-full mt-2">View Full Check-In Timeline</button>`);
+  timelineBtn.onclick = ()=> setView('checkinTimeline');
+  wrap.appendChild(timelineBtn);
+
+  return wrap;
+}
+function renderCheckinTimeline(){
+  const wrap = el(`<div class="max-w-2xl mx-auto"></div>`);
+  const backBtn = el(`<button class="text-xs text-[var(--ink-2)] hover:text-[var(--chalk)] mb-4">← Back</button>`);
+  backBtn.onclick = ()=> setView('progress');
+  wrap.appendChild(backBtn);
+  wrap.appendChild(el(`<div class="mb-6"><div class="label">Rolling Log</div><h1 class="font-display text-2xl font-bold mt-1">Check-In Timeline</h1><p class="text-sm text-[var(--ink-2)] mt-1">Every time a check-in has changed your plan, and why.</p></div>`));
+
+  const log = state.checkinAdjustmentLog||[];
+  if(log.length===0){
+    wrap.appendChild(el(`<div class="card p-4 text-sm text-[var(--ink-2)]">No plan adjustments yet — this fills in automatically whenever a check-in changes your nutrition or cardio targets.</div>`));
+    return wrap;
+  }
+  log.forEach(entry=>{
+    const card = el(`<div class="card p-4 mb-3 cursor-pointer hover:border-[var(--chalk-dim)]"></div>`);
+    card.appendChild(el(`<div class="text-xs font-mono text-[var(--ink-2)] mb-1">${entry.date}</div>`));
+    card.appendChild(el(`<div class="text-sm font-medium mb-1">${entry.changes.map(c=>c.label).join(' & ')} adjusted</div>`));
+    card.appendChild(el(`<div class="text-xs text-[var(--chalk)]">View details →</div>`));
+    card.onclick = ()=>{ state.activeCheckinLogId = entry.id; setView('checkinExplanation'); };
+    wrap.appendChild(card);
+  });
+  return wrap;
+}
+
 function renderCoachDashboard(){
   const wrap = el(`<div class="pt-6 max-w-2xl mx-auto"></div>`);
   const head = el(`<div class="flex items-center justify-between mb-2"></div>`);
@@ -3165,7 +3230,12 @@ function renderTrainingCalendar(){
   for(let dayNum=1; dayNum<=daysInMonth; dayNum++){
     const entry = byDate[cursor];
     const isToday = cursor===today;
-    const cellStyle = `border-radius:10px; padding:4px; text-align:center; display:flex; flex-direction:column; align-items:center; justify-content:flex-start; min-height:56px; background:var(--bg-2); ${isToday?'border:2px solid var(--chalk-light);':'border:2px solid transparent;'}`;
+    // A check-in reminder lands on the first day of each deload week — the
+    // natural, already-lighter week to also ask for a photo/measurement/
+    // weight update, rather than adding a separate unrelated prompt.
+    const periodizationForDay = state.program && state.program.length ? computePeriodization(state.profile, null, cursor) : null;
+    const isCheckinDay = periodizationForDay && periodizationForDay.isDeload && periodizationForDay.daysElapsed % 7 === 0;
+    const cellStyle = `border-radius:10px; padding:4px; text-align:center; display:flex; flex-direction:column; align-items:center; justify-content:flex-start; min-height:56px; background:var(--bg-2); ${isToday?'border:2px solid var(--chalk-light);':(isCheckinDay?'border:2px solid var(--chalk-dim);':'border:2px solid transparent;')}`;
     const cell = el(`<div style="${cellStyle}"></div>`);
     cell.appendChild(el(`<div class="font-mono" style="font-size:14px; font-weight:600; color:${isToday?'var(--chalk-light)':'var(--ink-1)'};">${dayNum}</div>`));
     if(entry){
@@ -3178,6 +3248,12 @@ function renderTrainingCalendar(){
         const idx = state.program.findIndex(d=>d.name===entry.dayName);
         if(idx>=0){ state.activeDayIndex=idx; showCalendar=false; calendarViewDate=null; state.showingQuoteFor=idx; render(); }
       };
+    }
+    if(isCheckinDay){
+      cell.appendChild(el(`<div style="font-size:11px; margin-top:1px;" title="Check-in reminder">📋</div>`));
+      cell.style.cursor = 'pointer';
+      cell.title = (cell.title ? cell.title+' · ' : '') + 'Check-in due — tap to update your weight, measurements & photos';
+      cell.onclick = ()=>{ showCalendar=false; calendarViewDate=null; setView('photos'); };
     }
     grid.appendChild(cell);
     cursor = addDaysISO(cursor,1);
@@ -5227,6 +5303,14 @@ function renderProgress(){
   wrap.appendChild(el(`<h2 class="font-display text-2xl font-bold mb-1">Progress</h2>`));
   wrap.appendChild(el(`<p class="text-sm text-[var(--ink-2)] mb-6">Weekly trends across your logged sessions — top weight per session confirms progressive overload.</p>`));
 
+  if((state.checkinAdjustmentLog||[]).length>0){
+    const timelineCard = el(`<button class="card p-4 mb-6 w-full text-left flex items-center justify-between"></button>`);
+    timelineCard.appendChild(el(`<div><div class="text-sm font-medium">Check-In Timeline</div><div class="text-xs text-[var(--ink-2)] mt-0.5">${state.checkinAdjustmentLog.length} plan update${state.checkinAdjustmentLog.length!==1?'s':''} from your check-ins</div></div>`));
+    timelineCard.appendChild(el(`<div class="text-[var(--chalk)]">→</div>`));
+    timelineCard.onclick = ()=> setView('checkinTimeline');
+    wrap.appendChild(timelineCard);
+  }
+
   // bodyweight chart
   if(state.logs.bodyweight.length>0){
     const sortedForLatest = [...state.logs.bodyweight].sort((a,b)=>a.date<b.date?-1:1);
@@ -5358,10 +5442,10 @@ function chartOpts(dual=false){
 
 /* ============================= NOTIFICATIONS ============================= */
 let notificationsOpen = false;
-function addNotification(title, message){
+function addNotification(title, message, link){
   state.notifications = state.notifications || [];
   state.notifications.unshift({
-    id: genCode(8), date: todayISO(), title, message, read:false
+    id: genCode(8), date: todayISO(), title, message, read:false, link: link||null
   });
   queueSave();
 }
@@ -5387,10 +5471,17 @@ function renderNotificationBell(){
       panel.appendChild(el(`<div class="text-xs text-[var(--ink-2)]">Nothing yet.</div>`));
     } else {
       list.forEach(n=>{
-        const item = el(`<div class="py-2 border-b border-[var(--line)] last:border-0"></div>`);
+        const item = el(`<div class="py-2 border-b border-[var(--line)] last:border-0 ${n.link?'cursor-pointer hover:bg-[var(--bg-2)] rounded-lg px-1 -mx-1':''}"></div>`);
         item.appendChild(el(`<div class="text-xs font-mono text-[var(--ink-2)] mb-0.5">${n.date}</div>`));
         item.appendChild(el(`<div class="text-sm font-medium mb-0.5">${n.title}</div>`));
         item.appendChild(el(`<div class="text-xs text-[var(--ink-1)]">${n.message}</div>`));
+        if(n.link){
+          item.appendChild(el(`<div class="text-xs mt-1" style="color:var(--chalk);">Tap to view →</div>`));
+          item.onclick = ()=>{
+            notificationsOpen = false;
+            if(n.link.view==='checkinExplanation'){ state.activeCheckinLogId = n.link.logId; setView('checkinExplanation'); }
+          };
+        }
         panel.appendChild(item);
       });
     }
@@ -5471,6 +5562,17 @@ function renderPhotos(){
     }));
   });
   wrap.appendChild(checkinGrid);
+
+  const weightCard = el(`<div class="card p-3 mb-3"></div>`);
+  weightCard.appendChild(el(`<div class="label mb-2">Current Weight</div>`));
+  const weightRow = el(`<div class="flex items-center gap-2"></div>`);
+  const weightInp = el(`<input type="number" step="0.1" placeholder="${state.profile.weightUnit==='lb'?'lb':'kg'}" value="${newCheckinDraft.weightKg||''}" style="max-width:140px;">`);
+  weightInp.oninput = (e)=>{ newCheckinDraft.weightKg = e.target.value; };
+  weightRow.appendChild(weightInp);
+  weightRow.appendChild(el(`<span class="text-sm text-[var(--ink-2)]">${state.profile.weightUnit==='lb'?'lb':'kg'}</span>`));
+  weightCard.appendChild(weightRow);
+  weightCard.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mt-2">Used to keep your nutrition targets accurate — if it's moved meaningfully, your calorie and macro targets (and cardio, if relevant) will update automatically when you save.</p>`));
+  wrap.appendChild(weightCard);
 
   const hasBaselineMeasurements = state.profile.measurements && (state.profile.measurements.chest || state.profile.measurements.waist || state.profile.measurements.thigh || state.profile.measurements.bicep);
   const measCard = el(`<div class="card p-3 mb-3"></div>`);
@@ -5574,7 +5676,7 @@ function renderBaselineAnalysisCard(r){
   return card;
 }
 
-let newCheckinDraft = {front:null, side:null, rear:null, measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'}};
+let newCheckinDraft = {front:null, side:null, rear:null, weightKg:'', measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'}};
 
 // Compares a check-in's measurements against the client's baseline (from
 // onboarding), converting units as needed, and renders the deltas — this is
@@ -5847,12 +5949,93 @@ function runBaselineAnalysis(){
 
 function submitCheckin(){
   const id = genCode(8);
-  const checkin = {id, date:todayISO(), front:newCheckinDraft.front, side:newCheckinDraft.side, rear:newCheckinDraft.rear, measurements: Object.assign({}, newCheckinDraft.measurements)};
+  const checkin = {id, date:todayISO(), front:newCheckinDraft.front, side:newCheckinDraft.side, rear:newCheckinDraft.rear, weightKg:newCheckinDraft.weightKg, measurements: Object.assign({}, newCheckinDraft.measurements)};
   state.photos.checkins = state.photos.checkins || [];
   state.photos.checkins.push(checkin);
-  newCheckinDraft = {front:null, side:null, rear:null, measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'}};
+  newCheckinDraft = {front:null, side:null, rear:null, weightKg:'', measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'}};
+  applyCheckinAdjustments(checkin);
   queueSave(); render();
   runCheckinAnalysis(checkin);
+}
+
+function totalCardioMinutes(program){
+  let total = 0;
+  (program||[]).forEach(d=> (d.exercises||[]).forEach(ex=>{
+    if(ex.muscle==='Conditioning'){ const m=/(\d+)/.exec(ex.repRange||''); if(m) total += parseInt(m[1]); }
+  }));
+  return total;
+}
+// Recalculates nutrition targets and cardio prescription from a check-in's
+// updated weight, compares against what was previously prescribed, and — if
+// anything changed meaningfully — logs it to the rolling check-in log and
+// notifies the client with a link through to the full explanation. Uses the
+// same surgical cardio-reapplication pattern as ensureProgramCardio (strip
+// and reapply Conditioning exercises) rather than rebuilding the whole
+// program, so exercise selection elsewhere isn't unnecessarily reshuffled.
+function applyCheckinAdjustments(checkin){
+  const p = state.profile;
+  const oldWeightKg = parseFloat(p.weightKg)||null;
+  const newWeightRaw = parseFloat(checkin.weightKg);
+  if(!newWeightRaw) return null; // no weight given — nothing to recalculate from
+  const newWeightKg = fmt1((p.weightUnit==='lb') ? newWeightRaw/2.20462 : newWeightRaw);
+  const weightDiffKg = oldWeightKg ? fmt1(newWeightKg - oldWeightKg) : 0;
+  if(oldWeightKg && Math.abs(weightDiffKg) < 0.3) return null; // not a meaningful change
+
+  const oldCalKey = profileCalorieKey(p);
+  const oldTargets = state.targets ? state.targets[oldCalKey] : null;
+  const oldCardioMin = totalCardioMinutes(state.program);
+
+  p.weightKg = newWeightKg;
+  state.logs.bodyweight = state.logs.bodyweight || [];
+  state.logs.bodyweight.push({date:checkin.date, weightKg:newWeightKg});
+
+  state.targets = calcTargets(p);
+  const newCalKey = profileCalorieKey(p);
+  const newTargets = state.targets[newCalKey];
+
+  if(Array.isArray(state.program) && state.program.length){
+    state.program.forEach(day=>{ day.exercises = (day.exercises||[]).filter(ex=> ex.muscle!=='Conditioning'); });
+    const bodyMods = applyBodyTypeModifiers(p.bodyType);
+    applyCardioToProgram(state.program, p, bodyMods);
+    state.program.forEach(day=>{ day.exercises = orderExercisesByEvidence(day.exercises, priorityMuscleTags(p.priorityMuscles)); });
+    state.program.forEach(day=>{ const generated = buildSessionWarmupCooldown(day.exercises); day.warmup=generated.warmup; day.cooldown=generated.cooldown; });
+  }
+  const newCardioMin = totalCardioMinutes(state.program);
+
+  const changes = [];
+  const weightDirection = weightDiffKg>0 ? 'up' : 'down';
+  if(oldTargets && newTargets){
+    const calorieDiff = Math.round(newTargets.calories - oldTargets.calories);
+    if(Math.abs(calorieDiff) >= 50){
+      changes.push({
+        type:'nutrition', label:'Nutrition Targets',
+        oldValue:`${Math.round(oldTargets.calories)} kcal/day`, newValue:`${Math.round(newTargets.calories)} kcal/day`,
+        reason:`Your weight is ${weightDirection} ${Math.abs(weightDiffKg)}${p.weightUnit==='lb'?'lb':'kg'} since your last update. Calorie and macro targets are calculated from current weight, so they've been recalculated to keep your ${(oldCalKey||'').includes('cut')||calorieDiff<0?'deficit':'surplus'} accurate rather than drifting off target as your weight changes.`
+      });
+    }
+  }
+  if(Math.abs(newCardioMin - oldCardioMin) >= 15){
+    changes.push({
+      type:'cardio', label:'Weekly Cardio',
+      oldValue:`~${oldCardioMin} min/week`, newValue:`~${newCardioMin} min/week`,
+      reason:`Your updated weight changed the estimated gap to your target physique, so your weekly cardio volume has been recalculated to match — ${newCardioMin>oldCardioMin ? 'a bit more than before' : 'less than before, since less is now needed'}.`
+    });
+  }
+
+  if(changes.length===0){ queueSave(); return null; }
+
+  const logId = genCode(8);
+  const logEntry = {id:logId, date:checkin.date, checkinId:checkin.id, weightDiffKg, changes};
+  state.checkinAdjustmentLog = state.checkinAdjustmentLog || [];
+  state.checkinAdjustmentLog.unshift(logEntry);
+
+  addNotification(
+    'Your plan has been updated',
+    `Based on your ${checkin.date} check-in, we've adjusted your ${changes.map(c=>c.label.toLowerCase()).join(' and ')}. Tap to see what changed and why.`,
+    {view:'checkinExplanation', logId}
+  );
+  queueSave();
+  return logEntry;
 }
 
 // Compares a check-in's measurements against the client's baseline to give an
