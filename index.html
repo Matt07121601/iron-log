@@ -212,6 +212,7 @@ let state = {
     checkins:{}   // keyed by checkin id -> {status, result}
   },
   notifications:[], // [{id, date, title, message, read}]
+  coachChatHistory:[], // [{role:'user'|'coach', text}]
   mealPlan:{status:'idle', result:null, generatedAt:null},
   program:null,
   targets:null,
@@ -244,6 +245,7 @@ async function saveAll(){
       profile:state.profile, program:state.program, targets:state.targets,
       analysis:state.analysis, onboarded:state.onboarded, photos:state.photos,
       logs:state.logs, notifications:state.notifications, mealPlan:state.mealPlan,
+      coachChatHistory:state.coachChatHistory, programExplanationSeen:state.programExplanationSeen,
       readinessSkippedDate:state.readinessSkippedDate, todayAdjustment:state.todayAdjustment, showingReadinessExplanation:state.showingReadinessExplanation
     }), true);
   }catch(e){ console.error('Save failed', e); }
@@ -309,6 +311,7 @@ function freshClientState(){
       checkins:{}
     },
     notifications:[],
+    coachChatHistory:[],
     mealPlan:{status:'idle', result:null, generatedAt:null},
     program:null, targets:null, view:'dashboard', activeDayIndex:0,
     quoteQueue:[], showingQuoteFor:null,
@@ -328,6 +331,7 @@ async function loadClientState(id){
   ensureProgramCardio();
   ensurePriorityMuscles();
   ensureProgramExplanationSeen();
+  ensureCoachChatHistory();
   ensureReadinessLog();
   ensureProgramTechniques();
   ensureProgramWarmupCooldown();
@@ -403,6 +407,9 @@ function ensurePriorityMuscles(){
 }
 function ensureProgramExplanationSeen(){
   if(typeof state.programExplanationSeen!=='boolean') state.programExplanationSeen = true; // existing clients: don't surprise them with a new gate
+}
+function ensureCoachChatHistory(){
+  if(!Array.isArray(state.coachChatHistory)) state.coachChatHistory = [];
 }
 function ensureReadinessLog(){
   if(!Array.isArray(state.logs.readiness)) state.logs.readiness = [];
@@ -1676,6 +1683,7 @@ function render(){
   if(session.role==='coach' && session.viewingAsCoach) content.appendChild(renderCoachTools());
   if(state.view==='dashboard') content.appendChild(renderDashboard());
   else if(state.view==='workout') content.appendChild(renderWorkoutView());
+  else if(state.view==='coach') content.appendChild(renderCoachView());
   else if(state.view==='nutrition') content.appendChild(renderNutrition());
   else if(state.view==='tracker') content.appendChild(renderTracker());
   else if(state.view==='progress') content.appendChild(renderProgress());
@@ -2149,7 +2157,7 @@ function renderHeader(){
   if(session.role==='client'){ wrap.querySelector('#logoutBtn').onclick = logoutSession; }
   wrap.appendChild(el(`<div class="chalk-rule mt-4 mb-4"></div>`));
   const nav = el(`<div class="flex gap-1 overflow-x-auto -mx-1 px-1"></div>`);
-  const tabs = [['dashboard','Dashboard'],['nutrition','Nutrition'],['tracker','Tracker'],['workout','Workout'],['progress','Progress'],['photos','Photos']];
+  const tabs = [['dashboard','Dashboard'],['nutrition','Nutrition'],['tracker','Tracker'],['workout','Workout'],['coach','Coach'],['progress','Progress'],['photos','Photos']];
   tabs.forEach(([key,label])=>{
     const b = el(`<button class="tab-btn px-3 py-2 border-b-2 whitespace-nowrap ${state.view===key?'active':''}">${label}</button>`);
     b.onclick = ()=> setView(key);
@@ -4910,6 +4918,202 @@ function logManualHeartRate(bpm, context){
 }
 
 let chartInstances = [];
+/* ============================= COACH KNOWLEDGE BASE ============================= */
+// A curated, evidence-grounded Q&A library — not a live AI. Every entry
+// reflects mainstream, well-supported sports-science consensus (NSCA-style
+// guidance, RPE/RIR-based autoregulation, current recovery/periodization
+// literature) rather than any single study's specific numbers. Anything that
+// sounds like a specific injury or medical concern is deliberately redirected
+// to a professional rather than answered here — this is training education,
+// not diagnosis.
+const COACH_KB = [
+  {id:'squat-form', cat:'Form', keywords:['squat form','how to squat','squat technique','squat depth','squat cues'],
+    q:'How do I improve my squat form?',
+    a:'Feet roughly shoulder-width, toes turned out slightly (find what lets your knees track over your toes without strain). Brace your core like you\'re about to be punched in the stomach before you descend, keep your chest up and weight through your whole foot — not just your heels or toes. Aim to hit at least parallel (hip crease level with your knee) if your mobility allows it comfortably. Knees should track in the same direction as your toes throughout — if they cave inward, it often helps to consciously "screw your feet into the floor" as you drive up.'},
+  {id:'deadlift-form', cat:'Form', keywords:['deadlift form','how to deadlift','deadlift technique','deadlift cues','rounded back deadlift'],
+    q:'What are the key form cues for deadlifting safely?',
+    a:'The bar should stay close to your shins and thighs throughout the whole lift — the further it drifts away from your body, the more strain goes through your lower back. Set your back flat (a slight natural arch is fine, rounding is what to avoid) before you even start pulling, take the slack out of the bar, then drive through the floor with your legs as much as pull with your back. Hips and shoulders should rise together, not hips-first.'},
+  {id:'bench-form', cat:'Form', keywords:['bench press form','bench form','how to bench','bench technique','bench press cues'],
+    q:'How do I improve my bench press form?',
+    a:'Set your shoulder blades back and down and keep them pinned there for the whole set — this protects your shoulders and gives you a more stable base to press from. Feet flat on the floor for leg drive, a slight arch in your lower back is normal and fine. Lower the bar to roughly nipple level with control, and keep your wrists stacked directly over your elbows at the bottom rather than letting them bend backward.'},
+  {id:'ohp-form', cat:'Form', keywords:['overhead press form','shoulder press form','ohp technique','military press form'],
+    q:'What\'s good overhead press form?',
+    a:'Brace your core hard — a weak brace here is one of the most common reasons people feel it in their lower back instead of their shoulders. Start the bar near your collarbone, press it in a slight backward arc so it ends directly over your head (not out in front), and squeeze your glutes to avoid excessive lower-back arching as you press up.'},
+  {id:'pullup-form', cat:'Form', keywords:['pull up form','pullup technique','pull-up cues','chin up form'],
+    q:'How do I do pull-ups with good form?',
+    a:'Start from a full dead hang — don\'t cut the bottom range short, that\'s where a lot of the benefit is. Pull your elbows down and back rather than just up, aiming to get your chin over the bar without excessive swinging or kipping (unless you\'re specifically training kipping for a sport). If you can\'t do a full rep yet, banded assistance or a lat pulldown machine are both perfectly good ways to build toward it.'},
+  {id:'row-form', cat:'Form', keywords:['row form','bent over row technique','barbell row cues'],
+    q:'What\'s the right technique for barbell rows?',
+    a:'Hinge at the hips with a flat back (same principle as the deadlift — avoid rounding), and pull the bar toward your lower ribs/upper stomach rather than your chest. Lead with your elbows, and avoid using momentum from your lower back to heave the weight up — if you need to swing to complete a rep, the weight\'s too heavy for now.'},
+  {id:'knee-valgus', cat:'Form', keywords:['knees caving','knees cave in','knee valgus','knees in during squat'],
+    q:'My knees cave inward when I squat — is that a problem?',
+    a:'Some inward knee movement is common and not automatically dangerous, but if it\'s pronounced, it often means your glutes and hip external rotators aren\'t controlling the movement well enough for the load. Try consciously pushing your knees out in the same direction as your toes as you stand up, and consider lighter-weight glute/hip work (like banded lateral walks) to build that control. If it\'s severe or paired with pain, that\'s worth a physio\'s eyes rather than guesswork.'},
+
+  {id:'rpe-explained', cat:'Training Principles', keywords:['what is rpe','rpe scale','rate of perceived exertion'],
+    q:'What is RPE?',
+    a:'RPE (Rate of Perceived Exertion) is a 1-10 scale for how hard a set felt, where 10 means you couldn\'t have done another rep, 9 means you probably had one more rep left, 8 means about two more reps left, and so on. It\'s a way of gauging effort that adjusts to how you\'re feeling that specific day, rather than chasing a fixed number regardless of how ready your body actually is.'},
+  {id:'rir-explained', cat:'Training Principles', keywords:['what is rir','reps in reserve'],
+    q:'What does RIR mean?',
+    a:'RIR (Reps in Reserve) is basically the flip side of RPE — it\'s how many more reps you could have done before failure. RIR 2 means you stopped with roughly 2 reps left in the tank. Training in a specific RIR range (rather than always going to complete failure) helps manage fatigue while still providing enough stimulus to progress.'},
+  {id:'progressive-overload', cat:'Training Principles', keywords:['progressive overload','how to get stronger','how to build muscle basics'],
+    q:'What is progressive overload?',
+    a:'It\'s the core principle behind almost all training progress: gradually increasing the demand placed on your muscles over time — through more weight, more reps, more sets, or better technique/range of motion — so your body has a reason to keep adapting. Without it, your body has no reason to keep changing once it\'s adapted to your current routine, which is exactly why the app suggests small, evidence-based weight adjustments after each logged session.'},
+  {id:'rest-between-sets', cat:'Training Principles', keywords:['rest between sets','how long to rest','rest time'],
+    q:'How long should I rest between sets?',
+    a:'It depends on the goal: heavier, lower-rep strength work generally benefits from longer rest (2-3+ minutes) so you can produce near-maximal force again. Moderate hypertrophy work is usually fine with 60-90 seconds. Isolation/accessory work can often get away with even less. Your program already has rest times built in per exercise based on this — they\'re not arbitrary.'},
+  {id:'training-frequency', cat:'Training Principles', keywords:['how often train muscle','training frequency','how many times a week'],
+    q:'How often should I train each muscle group?',
+    a:'Current research generally supports training each muscle group at least twice a week for hypertrophy, rather than the older "one massive session per muscle per week" approach — total weekly volume seems to matter more than how it\'s distributed, but spreading it across 2+ sessions tends to allow better quality per session. Your program\'s split is already built around this.'},
+  {id:'superset-explained', cat:'Training Principles', keywords:['what is a superset','superset meaning'],
+    q:'What\'s a superset?',
+    a:'Two exercises performed back-to-back with little to no rest in between, then a normal rest before repeating. It\'s a good way to increase how much work you fit into a session and add some extra metabolic stress — your program only pairs isolation exercises this way, since heavy compound lifts need full recovery between sets to be loaded safely and effectively.'},
+  {id:'dropset-explained', cat:'Training Principles', keywords:['what is a drop set','drop set meaning'],
+    q:'What\'s a drop set?',
+    a:'After finishing your normal working sets on an exercise, you immediately drop the weight by roughly 20-25% and keep going for a few more reps, with no rest. It\'s an intensity technique for pushing past a sticking point once straight sets alone stop producing new progress — generally most useful for more experienced lifters, which is why your program only assigns it if you\'re set to Advanced experience.'},
+  {id:'deload-explained', cat:'Training Principles', keywords:['what is a deload','why deload','deload week meaning'],
+    q:'Why do I have a deload week?',
+    a:'A deload is a planned week of reduced volume and/or intensity, built in every few weeks specifically so fatigue doesn\'t quietly accumulate past the point where you can keep progressing. It\'s not a sign anything\'s wrong or that you\'re losing progress — skipping deloads is one of the more common reasons people plateau or get hurt after months of otherwise good training.'},
+  {id:'warmup-why', cat:'Training Principles', keywords:['why warm up','importance of warming up','do i need to warm up'],
+    q:'Why is warming up important?',
+    a:'A proper warm-up raises muscle temperature and prepares the specific movement patterns you\'re about to load, which improves both performance and safety on your working sets. Doing lighter warm-up sets of the same exercise (rather than just generic cardio) tends to matter most for main lifts — which is exactly why your program builds these in per exercise.'},
+  {id:'stretching-timing', cat:'Training Principles', keywords:['static stretching before workout','dynamic stretching','when to stretch','stretching before or after'],
+    q:'Should I stretch before or after my workout?',
+    a:'Dynamic stretching (moving through a range of motion, like leg swings or arm circles) is generally better before lifting — static stretching (holding a stretch still) right before heavy lifting has been shown to temporarily reduce force output. Static stretching is a better fit after your session, once you\'re warm and finished, which is exactly how your program\'s warm-up and cool-down are structured.'},
+  {id:'plateau', cat:'Training Principles', keywords:['plateau','stopped progressing','not seeing results','stuck at same weight'],
+    q:'I feel like I\'ve plateaued — what should I do?',
+    a:'A few common causes: not enough progressive overload over time, insufficient recovery (sleep, calories, or stress), or simply needing a deload if fatigue has quietly built up. Check your logged history in the Progress tab for a real trend rather than a single bad session — genuine plateaus usually take several weeks of flat numbers to confirm, not one off day.'},
+
+  {id:'doms', cat:'Recovery', keywords:['doms','muscle soreness','sore muscles','why am i sore'],
+    q:'What is DOMS and is it necessary for progress?',
+    a:'DOMS (Delayed Onset Muscle Soreness) is the soreness that typically peaks 24-72 hours after a session, especially after new or unfamiliar movements. It\'s not actually a reliable marker of how effective a workout was — you can build muscle and strength perfectly well without much soreness at all once your body adapts to a movement, so don\'t chase soreness as a goal.'},
+  {id:'train-through-soreness', cat:'Recovery', keywords:['train through soreness','workout while sore','sore should i train'],
+    q:'Should I train through soreness?',
+    a:'Mild-to-moderate muscle soreness is generally fine to train through — light movement can even help it feel better. The distinction that matters is soreness (dull, diffuse, muscle-wide) versus sharp or joint-specific pain, which is a different signal and shouldn\'t be pushed through. If in doubt, easing off that specific movement for a session is always the safer call.'},
+  {id:'sleep-recovery', cat:'Recovery', keywords:['sleep and recovery','how much sleep','sleep for muscle growth'],
+    q:'How much does sleep actually matter for recovery?',
+    a:'Quite a lot — sleep is when a large share of muscle repair and hormonal recovery happens. Most adults need somewhere around 7-9 hours for this to work well; consistently under-sleeping is one of the more common hidden reasons people feel run-down or stop progressing despite training hard.'},
+  {id:'rest-days', cat:'Recovery', keywords:['what to do on rest days','rest day activity','active recovery'],
+    q:'What should I do on rest days?',
+    a:'Light activity — walking, easy cycling, mobility work — tends to aid recovery more than doing absolutely nothing (this is often called active recovery), as long as it\'s genuinely easy and not another hard session in disguise. Complete rest is also fine, especially if you\'re run down; there\'s no strict requirement either way.'},
+  {id:'overtraining-signs', cat:'Recovery', keywords:['overtraining','signs of overtraining','training too much','am i overtraining'],
+    q:'What are the signs of overtraining?',
+    a:'Common signs include persistent fatigue that doesn\'t improve with a normal night\'s sleep, unusually elevated resting heart rate, declining performance despite consistent effort, mood changes, and getting sick more often than usual. If several of these show up together over more than a week or two, it\'s worth easing back — your program\'s built-in deload weeks exist specifically to help prevent this before it happens.'},
+  {id:'protein-recovery', cat:'Recovery', keywords:['protein for recovery','protein muscle growth','how much protein'],
+    q:'How does protein affect recovery and muscle growth?',
+    a:'Protein supplies the amino acids your body uses to repair and build muscle tissue after training — it\'s consistently one of the most important nutrition factors for recovery. Your specific daily target is already calculated for you on the Nutrition tab based on your goal and stats, so that\'s the number worth tracking against day to day.'},
+
+  {id:'sharp-pain', cat:'Safety', keywords:['sharp pain','pain during exercise','joint pain','something hurts','hurts when i lift','pulled something','tweaked','sprain','strain','knee pain','shoulder pain','back pain','hip pain','wrist pain','elbow pain','ankle pain'],
+    q:'I felt sharp pain during an exercise — what should I do?',
+    a:'Stop that exercise for now — sharp, sudden, or joint-specific pain is a different signal from normal training fatigue or muscle soreness, and pushing through it isn\'t a good idea. This app can\'t assess or diagnose what\'s actually going on, so please get it looked at by a GP or physio, especially if it doesn\'t settle quickly or happens again. If you disclosed a relevant injury during setup, your program already avoids some higher-risk exercises for that area — but that\'s a precaution, not a substitute for a professional opinion on new pain.'},
+  {id:'when-see-doctor', cat:'Safety', keywords:['when to see a doctor','should i see a physio','need a doctor'],
+    q:'When should I actually see a doctor or physio about a training issue?',
+    a:'Generally: if pain is sharp rather than a dull ache, if it\'s joint-specific rather than general muscle fatigue, if it doesn\'t improve within a few days of rest, if it affects your normal daily movement, or if it happens repeatedly with the same exercise. When in doubt, getting it checked is always the safer option — this app is training education, not a diagnostic tool.'},
+
+  {id:'cardio-muscle-loss', cat:'Cardio', keywords:['cardio lose muscle','cardio interfere with gains','too much cardio','cardio and strength'],
+    q:'Will doing cardio make me lose muscle or hurt my gains?',
+    a:'High-volume, high-frequency cardio alongside heavy resistance training can measurably interfere with strength and hypertrophy gains — this is well-documented and is exactly why your program\'s cardio amount is scaled to your specific goal rather than a flat number. If your goal is muscle or strength-focused, your cardio prescription is deliberately kept to a light, general-health minimum for this reason; fat-loss and endurance goals get meaningfully more since it directly supports those goals instead of competing with them.'},
+  {id:'best-time-train', cat:'General', keywords:['best time of day to train','morning or evening workout','when should i train'],
+    q:'Is there a best time of day to train?',
+    a:'Performance can be marginally better later in the day for some people due to body temperature and hormonal rhythms, but the research on this is fairly small in practical terms — by far the most important factor is consistency, so the best time to train is whichever time you can actually stick to long-term.'},
+  {id:'hydration', cat:'General', keywords:['hydration','how much water','drink water workout'],
+    q:'How much water should I drink around training?',
+    a:'Even mild dehydration (around 2% of bodyweight) can measurably reduce strength and endurance performance, so it\'s worth taking seriously. A reasonable general approach is drinking to satisfy thirst throughout the day plus a bit extra around training sessions, especially in hot conditions or longer sessions.'},
+];
+
+const COACH_STOPWORDS = new Set(['a','an','the','is','are','was','were','do','does','did','i','my','me','you','your','it','to','of','for','and','or','in','on','at','how','what','why','when','should','will','can','could','would','have','has','had','be','being','been','this','that','these','those','with','about','if','so','just','get','got','really','very','some','like','today','now','well','actually','basically','kind','sort','thing','things','stuff']);
+function tokenizeForMatch(text){
+  return (text||'').toLowerCase().replace(/[^a-z0-9\s]/g,' ').split(/\s+/).filter(w=> w.length>2 && !COACH_STOPWORDS.has(w));
+}
+// Word-overlap scoring rather than exact-phrase substring matching — phrasing
+// varies a lot in how people naturally ask questions, so this needs to be
+// forgiving rather than requiring a verbatim keyword match. Longer/rarer
+// words count for more since they're more distinctive of intent than short
+// common ones.
+function matchCoachKB(query){
+  const queryWords = new Set(tokenizeForMatch(query));
+  if(queryWords.size===0) return null;
+  let best = null, bestScore = 0;
+  COACH_KB.forEach(entry=>{
+    const entryWords = new Set([
+      ...entry.keywords.flatMap(kw=>tokenizeForMatch(kw)),
+      ...tokenizeForMatch(entry.q)
+    ]);
+    let score = 0;
+    // Every genuine overlapping word gets a solid baseline (so a single
+    // distinctive term like "RPE" or "DOMS" is enough on its own), with
+    // extra credit for longer, more specific words on top of that.
+    queryWords.forEach(w=>{ if(entryWords.has(w)) score += 3 + Math.max(0, w.length-4); });
+    // Safety-relevant answers get a bias on ties/near-ties — if a query is
+    // genuinely ambiguous between "how do I do this exercise" and "something
+    // hurts when I do this exercise", defaulting to the cautious redirect is
+    // the safer failure mode than defaulting to form advice.
+    if(entry.cat==='Safety') score += 2;
+    if(score > bestScore){ bestScore = score; best = entry; }
+  });
+  return bestScore >= 3 ? best : null; // require at least one genuine keyword overlap, not pure noise
+}
+
+function renderCoachView(){
+  if(!Array.isArray(state.coachChatHistory)) state.coachChatHistory = [];
+  const wrap = el(`<div class="max-w-2xl mx-auto"></div>`);
+  wrap.appendChild(el(`<div class="mb-4"><h1 class="font-display text-2xl font-bold">Ask Your Coach</h1><p class="text-sm text-[var(--ink-2)] mt-1">Evidence-based answers on training, form, and recovery — a curated knowledge base, not a live person, so keep anything specific to your own situation for your actual coach.</p></div>`));
+
+  const suggestions = ['What is RPE?','Why do I have a deload week?','Should I train through soreness?','What\'s good squat form?'];
+  const chipRow = el(`<div class="flex flex-wrap gap-2 mb-4"></div>`);
+  suggestions.forEach(s=>{
+    const chip = el(`<button class="text-xs px-3 py-1.5 rounded-full border border-[var(--line)] text-[var(--ink-2)] hover:text-[var(--chalk)] hover:border-[var(--chalk-dim)]">${s}</button>`);
+    chip.onclick = ()=> askCoach(s);
+    chipRow.appendChild(chip);
+  });
+  wrap.appendChild(chipRow);
+
+  const chatBox = el(`<div class="card p-4 mb-4 space-y-3" style="min-height:200px; max-height:50vh; overflow-y:auto;" id="coach-chat-box"></div>`);
+  if(state.coachChatHistory.length===0){
+    chatBox.appendChild(el(`<div class="text-sm text-[var(--ink-2)] text-center py-6">Ask a question below, or tap a suggestion above to get started.</div>`));
+  }
+  state.coachChatHistory.forEach(msg=>{
+    if(msg.role==='user'){
+      chatBox.appendChild(el(`<div class="flex justify-end"><div class="px-3 py-2 rounded-lg max-w-[85%] text-sm" style="background:var(--chalk); color:var(--chalk-text);">${msg.text}</div></div>`));
+    } else {
+      chatBox.appendChild(el(`<div class="flex justify-start"><div class="px-3 py-2 rounded-lg max-w-[85%] text-sm" style="background:var(--bg-2); color:var(--ink-1);">${msg.text}</div></div>`));
+    }
+  });
+  wrap.appendChild(chatBox);
+
+  const inputRow = el(`<div class="flex gap-2"></div>`);
+  const input = el(`<input type="text" placeholder="Ask about form, recovery, training principles…" class="flex-1">`);
+  const sendBtn = el(`<button class="btn btn-chalk px-4 py-2 rounded-lg">Ask</button>`);
+  const submit = ()=>{
+    const val = input.value.trim();
+    if(!val) return;
+    askCoach(val);
+    input.value = '';
+  };
+  sendBtn.onclick = submit;
+  input.onkeydown = (e)=>{ if(e.key==='Enter') submit(); };
+  inputRow.appendChild(input);
+  inputRow.appendChild(sendBtn);
+  wrap.appendChild(inputRow);
+
+  setTimeout(()=>{
+    const box = document.getElementById('coach-chat-box');
+    if(box) box.scrollTop = box.scrollHeight;
+  }, 0);
+
+  return wrap;
+}
+function askCoach(question){
+  if(!Array.isArray(state.coachChatHistory)) state.coachChatHistory = [];
+  state.coachChatHistory.push({role:'user', text:question});
+  const match = matchCoachKB(question);
+  const answer = match
+    ? match.a
+    : `I don't have a specific answer for that one in my knowledge base yet. Try rephrasing, tap one of the suggestions above, or bring it to your coach directly — they'll have the full picture on your specific situation.`;
+  state.coachChatHistory.push({role:'coach', text:answer});
+  queueSave();
+  render();
+}
+
 function renderProgress(){
   chartInstances.forEach(c=>c.destroy());
   chartInstances = [];
