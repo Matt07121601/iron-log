@@ -327,6 +327,7 @@ async function loadClientState(id){
   normalizeProgramRestTimes();
   ensureProgramCardio();
   ensurePriorityMuscles();
+  ensureProgramExplanationSeen();
   ensureReadinessLog();
   ensureProgramTechniques();
   ensureProgramWarmupCooldown();
@@ -399,6 +400,9 @@ function ensureHeartRateLog(){
 }
 function ensurePriorityMuscles(){
   if(!Array.isArray(state.profile.priorityMuscles)) state.profile.priorityMuscles = [];
+}
+function ensureProgramExplanationSeen(){
+  if(typeof state.programExplanationSeen!=='boolean') state.programExplanationSeen = true; // existing clients: don't surprise them with a new gate
 }
 function ensureReadinessLog(){
   if(!Array.isArray(state.logs.readiness)) state.logs.readiness = [];
@@ -1324,10 +1328,119 @@ function parseRepRange(repRange){
   return {min:0, max:999};
 }
 // Rounds to a realistic loadable weight — plates aren't infinitely fine-grained.
+/* ============================= PERIODIZATION & DELOADS ============================= */
+// Deload frequency by training experience — advanced trainees accumulate
+// fatigue fastest from higher training intensity/volume and need more
+// frequent unloading (every 4 weeks), novices can sustain a longer
+// uninterrupted progression before needing one (every 8 weeks), intermediate
+// sits in between. This mirrors standard NSCA-style periodization guidance
+// rather than a single fixed deload frequency for everyone.
+const DELOAD_FREQUENCY_WEEKS = {novice:8, intermediate:5, advanced:4};
+// Parses a rep-range-style RIR string like "2-3" or "1-2" into [lo, hi].
+function parseRirRange(rirStr){
+  const nums = (rirStr||'').match(/\d+/g);
+  if(!nums || !nums.length) return null;
+  return nums.length>=2 ? [parseInt(nums[0]), parseInt(nums[1])] : [parseInt(nums[0]), parseInt(nums[0])];
+}
+function shiftRirRange(rirStr, delta){
+  const parsed = parseRirRange(rirStr);
+  if(!parsed) return rirStr;
+  const lo = Math.max(0, Math.round(parsed[0]+delta));
+  const hi = Math.max(lo, Math.round(parsed[1]+delta));
+  return lo===hi ? `${lo}` : `${lo}-${hi}`;
+}
+function shiftRepRange(repStr, delta){
+  const parsed = parseRirRange(repStr); // same "extract two numbers" logic works for rep ranges too
+  if(!parsed) return repStr;
+  const lo = Math.max(1, Math.round(parsed[0]+delta));
+  const hi = Math.max(lo, Math.round(parsed[1]+delta));
+  return `${lo}-${hi}`;
+}
+// Microcycle: the daily wave of intensity WITHIN a week, layered on top of
+// (not instead of) the mesocycle's week-to-week trend. Undulating the load
+// day-to-day (heavy/moderate/light) is well-evidenced for intermediate and
+// advanced trainees (Rhea et al. 2002 and subsequent DUP research) — novices
+// are deliberately excluded, same reasoning as elsewhere in this app: less
+// day-to-day complexity while they're still building base technique.
+const MICROCYCLE_WAVE = [
+  {label:'Heavy', repShift:-2, rirShift:-1},
+  {label:'Moderate', repShift:0, rirShift:0},
+  {label:'Light', repShift:3, rirShift:1},
+];
+function computeMicrocycle(profile, dayIndex){
+  if((profile.trainingExperience||'intermediate')==='novice' || dayIndex==null) return {label:'', repShift:0, rirShift:0};
+  return MICROCYCLE_WAVE[dayIndex % MICROCYCLE_WAVE.length];
+}
+// Computes where the client currently sits in their mesocycle, live from
+// today's date vs their program start date — same "always current, never
+// stale" approach already used for warm-up weights and technique guidance.
+function computePeriodization(profile, dayIndex, asOfDate){
+  const exp = profile.trainingExperience || 'intermediate';
+  const mesoLength = DELOAD_FREQUENCY_WEEKS[exp] || 5;
+  const start = profile.programStartDate || todayISO();
+  const evalDate = asOfDate || todayISO();
+  const daysElapsed = Math.max(0, Math.round((new Date(evalDate+'T00:00:00') - new Date(start+'T00:00:00')) / 86400000));
+  const weekNumber = Math.floor(daysElapsed/7) + 1;
+  const weekInMesocycle = ((weekNumber-1) % mesoLength) + 1;
+  const isDeload = weekInMesocycle === mesoLength;
+  const mesocycleNumber = Math.ceil(weekNumber/mesoLength);
+
+  let setMultiplier = 1, rirAdjustment = 0, phaseLabel;
+  if(isDeload){
+    setMultiplier = 0.5; rirAdjustment = 2;
+    phaseLabel = 'Deload — reduced volume this week to help you recover and keep progressing long-term';
+  } else {
+    // Progress from baseline (week 1) toward peak effort the week before the
+    // deload — volume creeps up slightly, working sets get taken closer to
+    // failure, then the deload resets it so the next block starts fresh.
+    const progressiveWeeks = mesoLength - 1;
+    const progressFraction = progressiveWeeks>1 ? (weekInMesocycle-1)/(progressiveWeeks-1) : 0;
+    setMultiplier = 1 + 0.2*progressFraction;
+    rirAdjustment = -2*progressFraction;
+    phaseLabel = weekInMesocycle===1
+      ? 'Block start — baseline volume and effort'
+      : `Building — week ${weekInMesocycle} of ${progressiveWeeks} before your next deload`;
+  }
+  const microcycle = isDeload ? {label:'', repShift:0, rirShift:0} : computeMicrocycle(profile, dayIndex);
+  return {weekNumber, weekInMesocycle, mesocycleLength:mesoLength, mesocycleNumber, isDeload, setMultiplier, rirAdjustment, phaseLabel, microcycle};
+}
+// Macrocycle: the big-picture view — how many mesocycles have passed, and
+// (when the client has done a physique comparison with a timeframe estimate)
+// roughly how many more are expected before reaching their target. This is
+// intentionally just a rough guide shown to the client, not a hard schedule —
+// real progress determines the real timeline, not a calendar guess.
+function computeMacrocycleSummary(profile){
+  const periodization = computePeriodization(profile);
+  const gapAnalysis = (typeof state!=='undefined' && state.analysis && state.analysis.baseline && state.analysis.baseline.result) || null;
+  const estWeeks = gapAnalysis ? gapAnalysis.timeframeWeeksEstimate : null;
+  const mesoLength = periodization.mesocycleLength;
+  const estMesocycles = estWeeks ? Math.max(1, Math.ceil(estWeeks/mesoLength)) : null;
+  return {
+    mesocycleNumber: periodization.mesocycleNumber,
+    mesocycleLength: mesoLength,
+    weekNumber: periodization.weekNumber,
+    estMesocycles,
+    estWeeks
+  };
+}
+// Applies the current periodization state to one exercise's prescription —
+// adjusted set count, RIR, and (for non-deload weeks) the day's microcycle
+// wave on reps/RIR — without touching the underlying stored program.
+function applyPeriodizationToExercise(ex, periodization){
+  if(ex.muscle==='Conditioning') return ex; // deloads/waves target resistance-training fatigue specifically
+  const adjustedSets = Math.max(1, Math.round(ex.sets * periodization.setMultiplier));
+  const totalRirShift = periodization.rirAdjustment + (periodization.microcycle ? periodization.microcycle.rirShift : 0);
+  const adjustedRir = shiftRirRange(ex.rir, totalRirShift);
+  const repShift = periodization.microcycle ? periodization.microcycle.repShift : 0;
+  const adjustedRepRange = repShift ? shiftRepRange(ex.repRange, repShift) : ex.repRange;
+  return {...ex, sets:adjustedSets, rir:adjustedRir, repRange:adjustedRepRange};
+}
+
 function roundToPlate(kg){
   if(!kg || kg<=0) return 0;
   const increment = kg<20 ? 1 : (kg<60 ? 2.5 : 5);
   return Math.round(kg/increment)*increment;
+
 }
 // Rough expected-RPE at each warm-up intensity — used to judge whether a
 // warm-up set felt easier or harder than a typical day, and adjust the next
@@ -1494,8 +1607,16 @@ function suggestNextWeight(dayName, exerciseName, repRange){
   // auto-initialized with empty placeholder sets the moment the page renders,
   // even before anything's actually logged, which would otherwise shadow the
   // last real session and silently break the suggestion for the whole day.
-  const usableEntry = entries.find(e => e.exercises[exerciseName].some(s=>s.done && s.weight));
-  if(!usableEntry) return null;
+  const usableEntries = entries.filter(e => e.exercises[exerciseName].some(s=>s.done && s.weight));
+  if(usableEntries.length===0) return null;
+  // Deload weeks are intentionally lighter/easier by design — basing the next
+  // jump on a deload session's weight/RPE would anchor progression to an
+  // artificially-reduced number. Prefer the most recent NON-deload session;
+  // only fall back to a deload entry if that's genuinely all there is.
+  let usableEntry = usableEntries.find(e => !computePeriodization(state.profile, null, e.date).isDeload);
+  let skippedDeload = false;
+  if(!usableEntry){ usableEntry = usableEntries[0]; }
+  else if(usableEntry !== usableEntries[0]){ skippedDeload = true; }
   const lastSets = usableEntry.exercises[exerciseName].filter(s=>s.done && s.weight);
   if(lastSets.length===0) return null;
   const avgRpe = lastSets.reduce((s,x)=>s+(parseFloat(x.rpe)||8),0)/lastSets.length;
@@ -1517,6 +1638,7 @@ function suggestNextWeight(dayName, exerciseName, repRange){
   } else {
     mult = 1.0; reason = 'right at target — repeat this weight';
   }
+  if(skippedDeload) reason += ' (based on your last full-intensity session, before your deload week)';
   // Scale how big that jump (or deload) is by training experience: novices tend
   // to adapt faster and can handle bigger week-to-week jumps ("newbie gains"),
   // while advanced lifters progress more conservatively as gains slow down.
@@ -1536,6 +1658,7 @@ function render(){
   if(session.role==='coach' && !session.clientId){ root.appendChild(renderCoachDashboard()); return; }
   if(!state.onboarded){ root.appendChild(renderOnboarding()); return; }
   if(session.role==='client' && !state.profile.gpClearance){ root.appendChild(renderHealthSafetyGate()); return; }
+  if(session.role==='client' && !state.programExplanationSeen){ root.appendChild(renderProgramExplanation()); return; }
   if(session.role==='client'){
     const hasCheckedInToday = state.logs.readiness.some(r=> r.date===todayISO());
     if(!hasCheckedInToday && state.readinessSkippedDate!==todayISO()){
@@ -2240,6 +2363,106 @@ function renderReadinessExplanation(){
   return wrap;
 }
 
+// Shown once, right after onboarding finishes, before a new client ever sees
+// their Dashboard/Workout — explains WHY their specific plan looks the way it
+// does. Every line here is generated from this client's own actual profile
+// and generated program, not generic copy, so it stays accurate as the
+// program-building logic evolves.
+function explanationSection(title, html){
+  const card = el(`<div class="card p-4 mb-4"></div>`);
+  card.appendChild(el(`<div class="label mb-2" style="color:var(--chalk);">${title}</div>`));
+  const body = el(`<div class="text-sm text-[var(--ink-1)] leading-relaxed"></div>`);
+  body.innerHTML = html;
+  card.appendChild(body);
+  return card;
+}
+function renderProgramExplanation(){
+  const p = state.profile;
+  const wrap = el(`<div class="pt-8 max-w-2xl mx-auto pb-8"></div>`);
+  wrap.appendChild(el(`<div class="mb-6 text-center"><div class="label">Before You Start</div><h1 class="font-display text-2xl sm:text-3xl font-bold mt-1">Your Program, Explained</h1><p class="text-sm text-[var(--ink-2)] mt-2">Here's the actual reasoning behind how your plan was built — not a generic template.</p></div>`));
+
+  // --- Goals ---
+  const goalsList = (Array.isArray(p.goals) && p.goals.length) ? p.goals : (p.goal ? [p.goal] : []);
+  const goalDescs = goalsList.map(g=>{
+    const found = GOALS.find(x=>x.key===g);
+    return found ? `<li><b>${found.label}:</b> ${found.desc}</li>` : '';
+  }).join('');
+  wrap.appendChild(explanationSection('Your Goal' + (goalsList.length>1?'s':''),
+    `<ul class="list-disc pl-4 space-y-1">${goalDescs || '<li>Not yet set.</li>'}</ul>
+     <p class="mt-2 text-[var(--ink-2)]">This is what shapes your rep ranges, rest periods, and how much weekly volume you're doing.</p>`));
+
+  // --- Training Experience ---
+  const exp = p.trainingExperience || 'intermediate';
+  const mesoLength = DELOAD_FREQUENCY_WEEKS[exp] || 5;
+  const expText = {
+    novice: `You're set to <b>Novice</b>. Your program uses straight sets only — no supersets, drop sets, or pyramids yet. This isn't a simplified version of "real" training: added complexity isn't well-evidenced to outperform consistent straight-set progression while you're still building base technique.`,
+    intermediate: `You're set to <b>Intermediate</b>. Your program includes some structuring on top of straight sets — supersets on isolation work, and a reverse pyramid on your main lift if strength is one of your goals.`,
+    advanced: `You're set to <b>Advanced</b>. Your program leans more heavily on intensity techniques — reverse pyramids, pyramids, supersets, and (for muscle-focused goals) a drop set on your final isolation exercise — since more training history means you can handle these safely and tend to plateau faster on plain straight sets.`
+  }[exp] || '';
+  wrap.appendChild(explanationSection('Your Training Experience',
+    `<p>${expText}</p>
+     <p class="mt-2 text-[var(--ink-2)]">It also sets how often you get a deload — every ${mesoLength} weeks for you. More experienced training generally means more accumulated fatigue, so more frequent planned recovery weeks.</p>`));
+
+  // --- Injuries / exclusions ---
+  const injuryKw = injuryKeywordsFrom(p.injuries);
+  if(injuryKw.length){
+    wrap.appendChild(explanationSection('Adjusted for What You Disclosed',
+      `<p>You mentioned an issue with your <b>${injuryKw.join(', ')}</b>. A small number of higher-risk exercises for that area have been excluded from your program automatically. This isn't a substitute for guidance from your GP or physio — flag anything that doesn't feel right.</p>`));
+  }
+
+  // --- Priority muscles / exercise order ---
+  const priorityLabels = (p.priorityMuscles||[]).map(k=>{
+    const opt = PRIORITY_MUSCLE_OPTIONS.find(o=>o.key===k);
+    return opt ? opt.label : null;
+  }).filter(Boolean);
+  wrap.appendChild(explanationSection('Exercise Order',
+    priorityLabels.length
+      ? `<p>You flagged <b>${priorityLabels.join(', ')}</b> as priority areas. Research on exercise sequencing (Spineti et al., 2010) shows whichever exercise comes first in a session benefits most — so these get trained early, while you're freshest, ahead of the usual compound-before-isolation order.</p>`
+      : `<p>Compound (multi-joint) exercises are sequenced before isolation work in every session — exercises done earlier get more out of your fresh energy, and fatigue affects whatever comes later. Cardio always comes after lifting, not before, to avoid blunting your strength work.</p>`));
+
+  // --- Advanced techniques actually present ---
+  const techniquesFound = new Set();
+  (state.program||[]).forEach(day=> (day.exercises||[]).forEach(ex=>{ if(ex.technique && ex.technique!=='straight') techniquesFound.add(ex.technique); }));
+  if(techniquesFound.size){
+    const techDescs = {
+      reverse_pyramid: 'Reverse Pyramid — your heaviest set comes first, while you\'re freshest, then weight drops slightly each set.',
+      pyramid: 'Pyramid — starts lighter, builds to your heaviest set.',
+      drop_set: 'Drop Set — on your last set of a chosen exercise, weight drops immediately for a few extra reps to push past a plateau.',
+      superset: 'Superset — two exercises performed back-to-back with minimal rest, for a more time-efficient, higher-density session.',
+      giant_set: 'Giant Set — three exercises performed back-to-back, for extra metabolic stress.'
+    };
+    const items = [...techniquesFound].map(t=> `<li><b>${techDescs[t] ? techDescs[t].split(' — ')[0] : t}</b> — ${techDescs[t] ? techDescs[t].split(' — ')[1] : ''}</li>`).join('');
+    wrap.appendChild(explanationSection('Techniques In Your Program', `<ul class="list-disc pl-4 space-y-1">${items}</ul>`));
+  }
+
+  // --- Cardio ---
+  const cardioExercises = [];
+  (state.program||[]).forEach(d=> (d.exercises||[]).forEach(ex=>{ if(ex.muscle==='Conditioning') cardioExercises.push(ex); }));
+  if(cardioExercises.length){
+    const totalMin = cardioExercises.reduce((s,ex)=>{ const m=/(\d+)/.exec(ex.repRange||''); return s+(m?parseInt(m[1]):0); }, 0);
+    const hiitCount = cardioExercises.filter(ex=>/HIIT/.test(ex.name)).length;
+    const lissCount = cardioExercises.length - hiitCount;
+    wrap.appendChild(explanationSection('Cardio',
+      `<p>Your plan includes ~${totalMin} min/week of cardio (${hiitCount} HIIT session${hiitCount!==1?'s':''}, ${lissCount} steady-state), placed after lifting on the relevant days. The amount is scaled to your goal — fat-loss and endurance goals get meaningfully more; muscle/strength-only goals get a lighter general-health minimum, since research shows high-volume cardio can interfere with strength and hypertrophy gains.</p>`));
+  }
+
+  // --- Periodization ---
+  const macro = computeMacrocycleSummary(p);
+  let periodizationText = `<p>Your training runs in <b>${mesoLength}-week blocks</b>. Sets and effort gradually build across each block, then the final week is a planned deload — roughly half the volume, noticeably easier weights — before the next block starts fresh. This isn't a sign anything's wrong; it's what keeps you progressing over months rather than burning out.</p>`;
+  if(exp!=='novice'){
+    periodizationText += `<p class="mt-2">Within each week, your training days also rotate through a Heavy → Moderate → Light pattern — varying intensity day-to-day is well-supported for your experience level, rather than every session being identical.</p>`;
+  }
+  if(macro.estMesocycles){
+    periodizationText += `<p class="mt-2 text-[var(--ink-2)]">Based on your photo comparison's ~${macro.estWeeks}-week estimate to reach your target, that's roughly <b>${macro.estMesocycles} of these blocks</b> — a guide, not a fixed schedule.</p>`;
+  }
+  wrap.appendChild(explanationSection('How Your Training Is Paced', periodizationText));
+
+  const btn = el(`<button class="btn btn-chalk px-6 py-4 rounded-lg w-full text-base font-semibold mt-2">See My Workout →</button>`);
+  btn.onclick = ()=>{ state.programExplanationSeen = true; queueSave(); render(); };
+  wrap.appendChild(btn);
+
+  return wrap;
+}
 function renderHealthSafetyGate(){
   const p = state.profile;
   const wrap = el(`<div class="pt-10 max-w-2xl mx-auto"></div>`);
@@ -2610,6 +2833,7 @@ function handleOnboardNext(){
   state.program = buildProgram(state.profile);
   state.onboarded = true;
   state.profile.programStartDate = todayISO();
+  state.programExplanationSeen = false; // new client — show the "why your plan looks like this" page before their first workout view
   state.view='dashboard';
   queueSave();
   render();
@@ -3145,6 +3369,28 @@ function renderWorkoutView(){
     doneSets += s.filter(x=>x.done).length;
   });
 
+  if(!workoutEditMode){
+    const periodization = computePeriodization(state.profile, state.activeDayIndex);
+    const macro = computeMacrocycleSummary(state.profile);
+    const phaseCard = el(`<div class="p-3 rounded-lg mb-4" style="background:var(--bg-2); border:1px solid ${periodization.isDeload?'var(--chalk)':'var(--line)'};"></div>`);
+    const phaseHead = el(`<div class="flex items-center justify-between flex-wrap gap-1"></div>`);
+    phaseHead.appendChild(el(`<div class="text-xs font-mono text-[var(--ink-2)]">Mesocycle ${macro.mesocycleNumber}${macro.estMesocycles ? ' of ~'+macro.estMesocycles : ''} · Week ${periodization.weekInMesocycle} of ${periodization.mesocycleLength}</div>`));
+    if(periodization.isDeload){
+      phaseHead.appendChild(el(`<div class="text-xs font-semibold px-2 py-0.5 rounded-full" style="background:var(--chalk); color:var(--chalk-text);">DELOAD WEEK</div>`));
+    } else if(periodization.microcycle && periodization.microcycle.label){
+      phaseHead.appendChild(el(`<div class="text-xs font-semibold px-2 py-0.5 rounded-full" style="background:var(--bg-3); color:var(--ink-1);">${periodization.microcycle.label} day</div>`));
+    }
+    phaseCard.appendChild(phaseHead);
+    phaseCard.appendChild(el(`<div class="text-sm mt-1" style="color:${periodization.isDeload?'var(--chalk)':'var(--ink-1)'};">${periodization.phaseLabel}</div>`));
+    if(periodization.isDeload){
+      phaseCard.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mt-1.5">Sets are roughly halved and working weights should feel noticeably easier this week — this is intentional, not a sign anything's wrong. Planned recovery weeks like this help you keep progressing over the long run rather than burning out.</p>`));
+    }
+    if(macro.estMesocycles){
+      phaseCard.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mt-1.5">Based on your photo comparison's ~${macro.estWeeks}-week estimate to reach your target — a rough guide, not a fixed schedule. Real progress sets the real pace.</p>`));
+    }
+    wrap.appendChild(phaseCard);
+  }
+
   if(Array.isArray(day.warmup) && day.warmup.length){
     wrap.appendChild(renderProtocolCard('🔥 Warm-Up', day.warmup, 'Do this before your first working set — dynamic movement, not static stretching, since static stretching right before lifting can temporarily reduce strength.'));
   }
@@ -3198,6 +3444,8 @@ function renderProtocolCard(title, items, note){
 }
 
 function renderExerciseCard(day, ex, sessionLog, insideGroup){
+  const periodization = computePeriodization(state.profile, state.activeDayIndex);
+  ex = applyPeriodizationToExercise(ex, periodization);
   if(!sessionLog.exercises[ex.name]){
     sessionLog.exercises[ex.name] = Array.from({length:ex.sets}, ()=>({weight:'',reps:'',rpe:'',done:false}));
   }
@@ -5070,6 +5318,9 @@ const MUSCLE_TIMEFRAME_BY_EXPERIENCE = {
   intermediate: '3-6 months of consistent training for meaningfully visible muscle growth',
   advanced: '6-12+ months for a clearly noticeable change, since gains slow considerably with experience'
 };
+// Same ranges as above, as plain numbers — used for the macrocycle overview,
+// which needs something to actually count mesocycles against.
+const MUSCLE_TIMEFRAME_WEEKS_BY_EXPERIENCE = {novice:10, intermediate:20, advanced:36};
 // Deurenberg formula — a widely-used population-level body fat estimate from
 // BMI, age and gender. Only used as a fallback when the client hasn't given
 // an actual body fat % or measurements; always flagged as an estimate, since
@@ -5239,16 +5490,31 @@ function computePhysiqueGapAnalysis(profile){
     }
   }
 
+  let timeframeWeeksEstimate = null;
+  if(current && target){
+    const gap = fmt1(current.value - target.value);
+    if(gap > 1.5){
+      const leanMassKg = weight * (1 - current.value/100);
+      const targetWeightKg = leanMassKg / (1 - target.value/100);
+      const fatToLoseKg = Math.max(0, fmt1(weight - targetWeightKg));
+      const weeklyLossKg = weight * 0.006;
+      timeframeWeeksEstimate = Math.max(4, Math.round(fatToLoseKg / weeklyLossKg));
+    }
+  }
   if(goalsList.includes('muscle') || (style && (style.key==='athletic_muscular' || style.key==='strong_solid'))){
     trainingFocus = 'Prioritize progressive overload on compound lifts with adequate volume — meaningful muscle growth is a slow, consistent process, more so the more experienced you already are.';
     timeframeParts.push(MUSCLE_TIMEFRAME_BY_EXPERIENCE[profile.trainingExperience] || MUSCLE_TIMEFRAME_BY_EXPERIENCE.intermediate);
+    // Muscle growth is usually the slower, bottleneck process when both apply,
+    // so if this estimate is larger than any fat-loss estimate, it wins.
+    const muscleWeeks = MUSCLE_TIMEFRAME_WEEKS_BY_EXPERIENCE[profile.trainingExperience] || MUSCLE_TIMEFRAME_WEEKS_BY_EXPERIENCE.intermediate;
+    timeframeWeeksEstimate = Math.max(timeframeWeeksEstimate||0, muscleWeeks);
   }
 
   const timeframe = timeframeParts.length
     ? `Realistically: ${timeframeParts.join('; and separately, ')}. This assumes consistent training and nutrition — it's a guide, not a guarantee.`
     : 'Add a target body fat % or physique style, plus your own weight, for a timeframe estimate.';
 
-  return {clientAppraisal, targetAppraisal, keyDifferences, nutritionRecommendation, suggestedCalorieAdjustment, recommendedCalorieKey, trainingFocus, timeframe};
+  return {clientAppraisal, targetAppraisal, keyDifferences, nutritionRecommendation, suggestedCalorieAdjustment, recommendedCalorieKey, trainingFocus, timeframe, timeframeWeeksEstimate};
 }
 
 function runBaselineAnalysis(){
