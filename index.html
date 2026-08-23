@@ -1683,6 +1683,7 @@ function render(){
   if(session.role==='coach' && session.viewingAsCoach) content.appendChild(renderCoachTools());
   if(state.view==='dashboard') content.appendChild(renderDashboard());
   else if(state.view==='workout') content.appendChild(renderWorkoutView());
+  else if(state.view==='profile') content.appendChild(renderProfileView());
   else if(state.view==='coach') content.appendChild(renderCoachView());
   else if(state.view==='nutrition') content.appendChild(renderNutrition());
   else if(state.view==='tracker') content.appendChild(renderTracker());
@@ -2157,7 +2158,7 @@ function renderHeader(){
   if(session.role==='client'){ wrap.querySelector('#logoutBtn').onclick = logoutSession; }
   wrap.appendChild(el(`<div class="chalk-rule mt-4 mb-4"></div>`));
   const nav = el(`<div class="flex gap-1 overflow-x-auto -mx-1 px-1"></div>`);
-  const tabs = [['dashboard','Dashboard'],['nutrition','Nutrition'],['tracker','Tracker'],['workout','Workout'],['coach','Coach'],['progress','Progress'],['photos','Photos']];
+  const tabs = [['profile','Profile'],['dashboard','Dashboard'],['nutrition','Nutrition'],['tracker','Tracker'],['workout','Workout'],['coach','Coach'],['progress','Progress'],['photos','Photos']];
   tabs.forEach(([key,label])=>{
     const b = el(`<button class="tab-btn px-3 py-2 border-b-2 whitespace-nowrap ${state.view===key?'active':''}">${label}</button>`);
     b.onclick = ()=> setView(key);
@@ -5051,6 +5052,111 @@ function matchCoachKB(query){
     if(score > bestScore){ bestScore = score; best = entry; }
   });
   return bestScore >= 3 ? best : null; // require at least one genuine keyword overlap, not pure noise
+}
+
+/* ============================= PROFILE ============================= */
+function computeCurrentStreak(){
+  const schedule = computeAdaptiveSchedule(todayISO());
+  const pastEntries = schedule.filter(e=> e.status==='completed' || e.status==='missed').sort((a,b)=> a.date<b.date?1:-1);
+  let streak = 0;
+  for(const e of pastEntries){
+    if(e.status==='completed') streak++;
+    else break;
+  }
+  return streak;
+}
+function totalWorkoutsLogged(){
+  return Object.values(state.logs.workouts||{}).filter(w=> Object.values(w.exercises||{}).some(sets=> sets.some(s=>s.done))).length;
+}
+function renderProfileView(){
+  const p = state.profile;
+  const wrap = el(`<div class="max-w-2xl mx-auto"></div>`);
+
+  // --- Identity card ---
+  const idCard = el(`<div class="card p-5 mb-4 flex items-center gap-4"></div>`);
+  const initial = (p.name||'A').trim().charAt(0).toUpperCase();
+  idCard.appendChild(el(`<div class="rounded-full flex items-center justify-center font-display text-2xl font-bold flex-shrink-0" style="width:64px; height:64px; background:var(--chalk); color:var(--chalk-text);">${initial}</div>`));
+  const idText = el(`<div></div>`);
+  idText.appendChild(el(`<div class="font-display text-xl font-bold">${p.name || 'Athlete'}</div>`));
+  const memberSince = p.programStartDate ? new Date(p.programStartDate+'T00:00:00').toLocaleDateString(undefined,{month:'long', year:'numeric'}) : null;
+  idText.appendChild(el(`<div class="text-xs text-[var(--ink-2)] mt-0.5">${memberSince ? 'Member since '+memberSince : ''}</div>`));
+  idCard.appendChild(idText);
+  wrap.appendChild(idCard);
+
+  // --- Stats row, social-profile style ---
+  const streak = computeCurrentStreak();
+  const totalLogged = totalWorkoutsLogged();
+  const periodization = computePeriodization(p);
+  const statsRow = el(`<div class="grid grid-cols-4 gap-2 mb-4"></div>`);
+  const stat = (value, label)=> el(`<div class="card p-3 text-center"><div class="font-display text-xl font-bold" style="color:var(--chalk);">${value}</div><div class="text-[10px] text-[var(--ink-2)] uppercase mt-0.5">${label}</div></div>`);
+  statsRow.appendChild(stat(totalLogged, 'Workouts'));
+  statsRow.appendChild(stat(streak, 'Streak'));
+  statsRow.appendChild(stat(periodization.weekNumber, 'Week'));
+  statsRow.appendChild(stat(periodization.mesocycleNumber, 'Block'));
+  wrap.appendChild(statsRow);
+
+  // --- About ---
+  const aboutCard = el(`<div class="card p-4 mb-4"></div>`);
+  aboutCard.appendChild(el(`<div class="label mb-3">About</div>`));
+  const aboutRows = el(`<div class="space-y-2 text-sm"></div>`);
+  const goalsList = (Array.isArray(p.goals) && p.goals.length) ? p.goals : (p.goal ? [p.goal] : []);
+  const aboutRow = (label, value)=> value ? el(`<div class="flex justify-between"><span class="text-[var(--ink-2)]">${label}</span><span class="text-[var(--ink-1)] font-medium">${value}</span></div>`) : null;
+  [
+    aboutRow('Goal' + (goalsList.length>1?'s':''), goalsList.map(g=>(GOALS.find(x=>x.key===g)||{}).label).filter(Boolean).join(', ')),
+    aboutRow('Training Experience', p.trainingExperience ? p.trainingExperience.charAt(0).toUpperCase()+p.trainingExperience.slice(1) : ''),
+    aboutRow('Body Type', p.bodyType ? p.bodyType.charAt(0).toUpperCase()+p.bodyType.slice(1) : ''),
+    aboutRow('Equipment', p.equipment ? ({gym:'Full Gym', home:'Home (Dumbbells/Bands)', bodyweight:'Bodyweight Only'}[p.equipment]||p.equipment) : ''),
+    aboutRow('Training Days', p.daysPerWeek ? `${p.daysPerWeek}/week` : ''),
+    aboutRow('Priority Areas', (p.priorityMuscles||[]).map(k=>(PRIORITY_MUSCLE_OPTIONS.find(o=>o.key===k)||{}).label).filter(Boolean).join(', ')),
+  ].filter(Boolean).forEach(row=> aboutRows.appendChild(row));
+  aboutCard.appendChild(aboutRows);
+  wrap.appendChild(aboutCard);
+
+  // --- Physique journey ---
+  if(state.photos && (state.photos.baseline.front || state.photos.target.front)){
+    const journeyCard = el(`<div class="card p-4 mb-4"></div>`);
+    journeyCard.appendChild(el(`<div class="label mb-3">Physique Journey</div>`));
+    const journeyRow = el(`<div class="grid grid-cols-2 gap-3"></div>`);
+    const photoBox = (src, label)=> {
+      const box = el(`<div></div>`);
+      if(src) box.appendChild(el(`<img src="${src}" class="w-full rounded-lg object-cover" style="aspect-ratio:3/4;">`));
+      else box.appendChild(el(`<div class="w-full rounded-lg flex items-center justify-center text-xs text-[var(--ink-2)]" style="aspect-ratio:3/4; background:var(--bg-2);">Not set</div>`));
+      box.appendChild(el(`<div class="text-xs text-center text-[var(--ink-2)] mt-1">${label}</div>`));
+      return box;
+    };
+    journeyRow.appendChild(photoBox(state.photos.baseline.front, 'Baseline'));
+    journeyRow.appendChild(photoBox(state.photos.target.front, 'Target'));
+    journeyCard.appendChild(journeyRow);
+    const viewAllBtn = el(`<button class="btn btn-ghost text-xs px-3 py-2 rounded-lg w-full mt-3">View All Photos & Check-ins</button>`);
+    viewAllBtn.onclick = ()=> setView('photos');
+    journeyCard.appendChild(viewAllBtn);
+    wrap.appendChild(journeyCard);
+  }
+
+  // --- Quick settings ---
+  const settingsCard = el(`<div class="card p-4 mb-4"></div>`);
+  settingsCard.appendChild(el(`<div class="label mb-3">Settings</div>`));
+  const themeRow = el(`<div class="flex items-center justify-between py-2"></div>`);
+  themeRow.appendChild(el(`<span class="text-sm">Appearance</span>`));
+  const themeBtn = el(`<button class="btn btn-ghost text-xs px-3 py-2 rounded-lg">${(p.theme==='light')?'☀️ Light':'🌙 Dark'}</button>`);
+  themeBtn.onclick = ()=>{ p.theme = p.theme==='light' ? 'dark' : 'light'; preLoginTheme=p.theme; setStoredTheme(p.theme); applyTheme(); queueSave(); render(); };
+  themeRow.appendChild(themeBtn);
+  settingsCard.appendChild(themeRow);
+  const unitRow = el(`<div class="flex items-center justify-between py-2"></div>`);
+  unitRow.appendChild(el(`<span class="text-sm">Weight Unit</span>`));
+  const unitBtn = el(`<button class="btn btn-ghost text-xs px-3 py-2 rounded-lg">${(p.weightUnit||'kg').toUpperCase()}</button>`);
+  unitBtn.onclick = ()=>{ p.weightUnit = (p.weightUnit==='lb') ? 'kg' : 'lb'; queueSave(); render(); };
+  unitRow.appendChild(unitBtn);
+  settingsCard.appendChild(unitRow);
+  wrap.appendChild(settingsCard);
+
+  if(session.role==='client'){
+    const logoutBtn = el(`<button class="btn btn-ghost text-sm px-4 py-3 rounded-lg w-full text-[var(--ink-2)] hover:text-[var(--alert)] hover:border-[var(--alert)]">Log Out</button>`);
+    logoutBtn.onclick = logoutSession;
+    wrap.appendChild(logoutBtn);
+  }
+
+  return wrap;
 }
 
 function renderCoachView(){
