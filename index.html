@@ -195,7 +195,7 @@ let state = {
     weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg', theme:'dark',
     measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'},
     intermittentFasting:{enabled:false, protocol:''}, usesProteinShake:false, dailyTrainingTimes:{},
-    priorityMuscles:[],
+    priorityMuscles:[], avatarPhoto:null,
     injuries:'', medicalConditions:'', gpClearance:false,
     targetSpec:{bodyFatPct:'', physiqueStyle:''},
     goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:'', sessionMins:'', trainingTime:'AM',
@@ -296,7 +296,7 @@ function freshClientState(){
       weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg', theme:getStoredTheme(),
       measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'},
       intermittentFasting:{enabled:false, protocol:''}, usesProteinShake:false, dailyTrainingTimes:{},
-      priorityMuscles:[],
+      priorityMuscles:[], avatarPhoto:null,
       injuries:'', medicalConditions:'', gpClearance:false,
       targetSpec:{bodyFatPct:'', physiqueStyle:''},
       goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:'', sessionMins:'', trainingTime:'AM',
@@ -5151,11 +5151,35 @@ function renderProfileView(){
   // --- Identity card ---
   const idCard = el(`<div class="card p-5 mb-4 flex items-center gap-4"></div>`);
   const initial = (p.name||'A').trim().charAt(0).toUpperCase();
-  idCard.appendChild(el(`<div class="rounded-full flex items-center justify-center font-display text-2xl font-bold flex-shrink-0" style="width:64px; height:64px; background:var(--chalk); color:var(--chalk-text);">${initial}</div>`));
+  const avatarWrap = el(`<div class="relative flex-shrink-0" style="width:64px; height:64px;"></div>`);
+  const avatarCircle = el(`<div class="rounded-full flex items-center justify-center font-display text-2xl font-bold w-full h-full overflow-hidden" style="background:var(--chalk); color:var(--chalk-text);"></div>`);
+  if(p.avatarPhoto){
+    avatarCircle.appendChild(el(`<img src="${p.avatarPhoto}" class="w-full h-full object-cover">`));
+  } else {
+    avatarCircle.appendChild(el(`<span>${initial}</span>`));
+  }
+  avatarWrap.appendChild(avatarCircle);
+  const avatarInput = el(`<input type="file" accept="image/*" class="hidden">`);
+  avatarInput.onchange = async (e)=>{
+    const f = e.target.files[0];
+    if(!f) return;
+    p.avatarPhoto = await resizeImageFile(f, 300);
+    queueSave(); render();
+  };
+  avatarWrap.appendChild(avatarInput);
+  const avatarEditBtn = el(`<button class="absolute bottom-0 right-0 rounded-full flex items-center justify-center text-xs" style="width:22px; height:22px; background:var(--bg-1); border:1.5px solid var(--bg-0); cursor:pointer;" title="${p.avatarPhoto?'Change photo':'Upload photo'}">📷</button>`);
+  avatarEditBtn.onclick = ()=> avatarInput.click();
+  avatarWrap.appendChild(avatarEditBtn);
+  idCard.appendChild(avatarWrap);
   const idText = el(`<div></div>`);
   idText.appendChild(el(`<div class="font-display text-xl font-bold">${p.name || 'Athlete'}</div>`));
   const memberSince = p.programStartDate ? new Date(p.programStartDate+'T00:00:00').toLocaleDateString(undefined,{month:'long', year:'numeric'}) : null;
   idText.appendChild(el(`<div class="text-xs text-[var(--ink-2)] mt-0.5">${memberSince ? 'Member since '+memberSince : ''}</div>`));
+  if(p.avatarPhoto){
+    const removeBtn = el(`<button class="text-xs text-[var(--ink-2)] hover:text-[var(--alert)] mt-1">Remove photo</button>`);
+    removeBtn.onclick = ()=>{ p.avatarPhoto = null; queueSave(); render(); };
+    idText.appendChild(removeBtn);
+  }
   idCard.appendChild(idText);
   wrap.appendChild(idCard);
 
