@@ -193,7 +193,7 @@ let state = {
     weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg', theme:'dark',
     measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'},
     intermittentFasting:{enabled:false, protocol:''}, usesProteinShake:false, dailyTrainingTimes:{},
-    priorityMuscles:[], avatarPhoto:null,
+    priorityMuscles:[], avatarPhoto:null, ifThenPlan:'',
     injuries:'', medicalConditions:'', gpClearance:false,
     targetSpec:{bodyFatPct:'', physiqueStyle:''},
     goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:'', sessionMins:'', trainingTime:'AM',
@@ -212,6 +212,8 @@ let state = {
   notifications:[], // [{id, date, title, message, read}]
   coachChatHistory:[], // [{role:'user'|'coach', text}]
   checkinAdjustmentLog:[], // [{id, date, checkinId, weightDiffKg, changes:[{type,label,oldValue,newValue,reason}]}]
+  reflectionLog:[], // [{id, date, prompt, text, sharedWithCoach}]
+  ifThenNotifiedDates:[], // missed-session dates already reminded about, so the same one doesn't repeat
   mealPlan:{status:'idle', result:null, generatedAt:null},
   program:null,
   targets:null,
@@ -245,7 +247,8 @@ async function saveAll(){
       analysis:state.analysis, onboarded:state.onboarded, photos:state.photos,
       logs:state.logs, notifications:state.notifications, mealPlan:state.mealPlan,
       coachChatHistory:state.coachChatHistory, programExplanationSeen:state.programExplanationSeen,
-      checkinAdjustmentLog:state.checkinAdjustmentLog,
+      checkinAdjustmentLog:state.checkinAdjustmentLog, ifThenNotifiedDates:state.ifThenNotifiedDates,
+      reflectionLog:state.reflectionLog,
       readinessSkippedDate:state.readinessSkippedDate, todayAdjustment:state.todayAdjustment, showingReadinessExplanation:state.showingReadinessExplanation
     }), true);
   }catch(e){ console.error('Save failed', e); }
@@ -294,7 +297,7 @@ function freshClientState(){
       weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg', theme:getStoredTheme(),
       measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'},
       intermittentFasting:{enabled:false, protocol:''}, usesProteinShake:false, dailyTrainingTimes:{},
-      priorityMuscles:[], avatarPhoto:null,
+      priorityMuscles:[], avatarPhoto:null, ifThenPlan:'',
       injuries:'', medicalConditions:'', gpClearance:false,
       targetSpec:{bodyFatPct:'', physiqueStyle:''},
       goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:'', sessionMins:'', trainingTime:'AM',
@@ -312,7 +315,8 @@ function freshClientState(){
     },
     notifications:[],
     coachChatHistory:[],
-    checkinAdjustmentLog:[],
+    checkinAdjustmentLog:[], reflectionLog:[],
+    ifThenNotifiedDates:[],
     mealPlan:{status:'idle', result:null, generatedAt:null},
     program:null, targets:null, view:'dashboard', activeDayIndex:0,
     quoteQueue:[], showingQuoteFor:null,
@@ -334,6 +338,8 @@ async function loadClientState(id){
   ensureProgramExplanationSeen();
   ensureCoachChatHistory();
   ensureCheckinAdjustmentLog();
+  ensureReflectionLog();
+  ensureIfThenNotifiedDates();
   ensureReadinessLog();
   ensureProgramTechniques();
   ensureProgramWarmupCooldown();
@@ -344,6 +350,7 @@ async function loadClientState(id){
   ensureMealPlanFields();
   ensureTargetSpec();
   ensureHeartRateLog();
+  checkIfThenPlanTrigger();
   queueSave();
 }
 // Existing clients won't have a programStartDate saved (added alongside the
@@ -415,6 +422,12 @@ function ensureCoachChatHistory(){
 }
 function ensureCheckinAdjustmentLog(){
   if(!Array.isArray(state.checkinAdjustmentLog)) state.checkinAdjustmentLog = [];
+}
+function ensureReflectionLog(){
+  if(!Array.isArray(state.reflectionLog)) state.reflectionLog = [];
+}
+function ensureIfThenNotifiedDates(){
+  if(!Array.isArray(state.ifThenNotifiedDates)) state.ifThenNotifiedDates = [];
 }
 function ensureReadinessLog(){
   if(!Array.isArray(state.logs.readiness)) state.logs.readiness = [];
@@ -2156,6 +2169,21 @@ function renderCoachTools(){
   badge.appendChild(el(`<div class="text-xs font-mono" style="color:var(--chalk);">Coach view — editing ${state.profile.name}'s data</div>`));
   wrap.appendChild(badge);
 
+  const sharedReflections = (state.reflectionLog||[]).filter(r=>r.sharedWithCoach);
+  if(sharedReflections.length){
+    const rCard = el(`<div class="card p-4 mb-4"></div>`);
+    rCard.appendChild(el(`<div class="label mb-2">Shared Reflections</div>`));
+    rCard.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-3">Only entries ${state.profile.name} chose to share — anything private stays private.</p>`));
+    sharedReflections.slice(0,5).forEach(r=>{
+      const item = el(`<div class="mb-3 pb-3 border-b border-[var(--line)] last:border-0 last:mb-0 last:pb-0"></div>`);
+      item.appendChild(el(`<div class="text-xs font-mono text-[var(--ink-2)] mb-1">${r.date}</div>`));
+      item.appendChild(el(`<div class="text-sm font-medium mb-1">${r.prompt}</div>`));
+      item.appendChild(el(`<div class="text-sm text-[var(--ink-1)]">${r.text}</div>`));
+      rCard.appendChild(item);
+    });
+    wrap.appendChild(rCard);
+  }
+
   const suggestion = computeNutritionSuggestion();
   if(suggestion){
     const sCard = el(`<div class="card p-4 mb-4" style="border-color:var(--alert);"></div>`);
@@ -2276,6 +2304,17 @@ const GOALS = [
 // across the exercise library — some (Back, Shoulders) intentionally cover
 // more than one internal tag so the selection feels natural to a client
 // while still matching correctly against real exercises.
+// Implementation intentions ("if-then" planning) — deciding a concrete
+// response to an obstacle in advance is well-evidenced for adherence
+// (Gollwitzer), since it removes the need for in-the-moment willpower. The
+// plan only does its job if it's cued again at the actual moment the
+// obstacle occurs — see ifThenNotifiedDates / the missed-session check below.
+const IF_THEN_PLAN_OPTIONS = [
+  {key:'home_swap', label:"I'll do the At-Home version", desc:'Same muscle groups, whatever equipment you actually have that day.'},
+  {key:'bodyweight_swap', label:"I'll do the Bodyweight-Only version", desc:'For days with genuinely nothing else available.'},
+  {key:'reschedule', label:"I'll move it to another day this week", desc:"We'll already be tracking this automatically — this just confirms it's your plan."},
+  {key:'rest_guiltfree', label:"I'll treat it as a rest day, guilt-free", desc:"Sometimes that's the right call — we'll simply pick back up on the next session."},
+];
 const PRIORITY_MUSCLE_OPTIONS = [
   {key:'chest', label:'Chest', tags:['Chest']},
   {key:'back', label:'Back', tags:['Back','Lats']},
@@ -2731,6 +2770,20 @@ function renderOnboarding(){
     card.appendChild(field('Preferred training time', selectEl(['AM','Midday','PM'], p.trainingTime, v=>p.trainingTime=v)));
     card.appendChild(field('Equipment access *', selectEl(['','gym','home','bodyweight'], p.equipment, v=>p.equipment=v, ['Select…','Full Gym','Home (dumbbells/bands)','Bodyweight Only'])));
     card.appendChild(field('Equipment notes (optional)', inputText(p.equipmentNotes, v=>p.equipmentNotes=v, 'e.g. no barbell, resistance bands only')));
+
+    card.appendChild(el(`<div class="chalk-rule my-4"></div>`));
+    card.appendChild(el(`<div class="label mb-1">If You Can't Make It (optional)</div>`));
+    card.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-3">Deciding this now, rather than in the moment, makes it much more likely you'll actually follow through — this is one of the better-evidenced tricks in behaviour-change research. If you ever miss a session, we'll remind you of exactly what you chose here.</p>`));
+    IF_THEN_PLAN_OPTIONS.forEach(opt=>{
+      const active = p.ifThenPlan===opt.key;
+      const btn = el(`
+        <button class="w-full text-left p-3 rounded-lg border mb-2 ${active?'border-[var(--chalk)] bg-[var(--bg-2)]':'border-[var(--line)]'} transition">
+          <div class="font-display font-semibold text-sm ${active?'text-[var(--chalk)]':''}">${opt.label}</div>
+          <div class="text-xs text-[var(--ink-2)] mt-0.5">${opt.desc}</div>
+        </button>`);
+      btn.onclick = ()=>{ p.ifThenPlan = active ? '' : opt.key; render(); };
+      card.appendChild(btn);
+    });
   }
   else if(state.step===6){
     card.appendChild(el(`<h2 class="font-display text-xl mb-4">Diet Preferences</h2>`));
@@ -5356,9 +5409,22 @@ function renderProfileView(){
   return wrap;
 }
 
+let coachSubView = 'ask'; // 'ask' | 'reflect'
 function renderCoachView(){
   if(!Array.isArray(state.coachChatHistory)) state.coachChatHistory = [];
   const wrap = el(`<div class="max-w-2xl mx-auto"></div>`);
+
+  const subTabs = el(`<div class="flex gap-1 mb-5 p-1 rounded-lg" style="background:var(--bg-2); width:fit-content;"></div>`);
+  [['ask','Ask a Question'],['reflect','Reflect']].forEach(([key,label])=>{
+    const active = coachSubView===key;
+    const b = el(`<button class="text-xs px-4 py-2 rounded-lg ${active?'':'text-[var(--ink-2)]'}" style="${active?'background:var(--chalk); color:var(--chalk-text);':''}">${label}</button>`);
+    b.onclick = ()=>{ coachSubView=key; render(); };
+    subTabs.appendChild(b);
+  });
+  wrap.appendChild(subTabs);
+
+  if(coachSubView==='reflect'){ wrap.appendChild(renderReflectSection()); return wrap; }
+
   wrap.appendChild(el(`<div class="mb-4"><h1 class="font-display text-2xl font-bold">Ask Your Coach</h1><p class="text-sm text-[var(--ink-2)] mt-1">Evidence-based answers on training, form, and recovery — a curated knowledge base, not a live person, so keep anything specific to your own situation for your actual coach.</p></div>`));
 
   const suggestions = ['What is RPE?','Why do I have a deload week?','Should I train through soreness?','What\'s good squat form?'];
@@ -5415,6 +5481,76 @@ function askCoach(question){
   state.coachChatHistory.push({role:'coach', text:answer});
   queueSave();
   render();
+}
+
+/* ============================= REFLECTION (MOTIVATIONAL-INTERVIEWING STYLE) ============================= */
+// Open-ended, client-centered prompts — deliberately not yes/no, not leading,
+// and never followed by app-generated advice or an "answer". The point is
+// eliciting the client's own thinking (a core MI principle), not correcting
+// or directing it. Privacy is opt-IN per entry, not opt-out, so the default
+// respects the client's own ownership of what they've written.
+const REFLECTION_PROMPTS = [
+  "What's made this week harder than usual, if anything?",
+  "What's felt easier lately?",
+  "What's actually motivating you to keep going right now?",
+  "What would make it easier to stick with this over the next few weeks?",
+  "Is training getting in the way of anything else in your life at the moment — or helping it?",
+  "What's one thing you're proud of this week, training-related or not?",
+];
+let reflectPromptIndex = 0;
+function renderReflectSection(){
+  const wrap = el(`<div></div>`);
+  wrap.appendChild(el(`<div class="mb-4"><h1 class="font-display text-2xl font-bold">Reflect</h1><p class="text-sm text-[var(--ink-2)] mt-1">A private space to think out loud — no advice, no answers, just somewhere to put it. Nothing here is shared with your coach unless you choose to.</p></div>`));
+
+  const promptCard = el(`<div class="card p-4 mb-3"></div>`);
+  const promptRow = el(`<div class="flex items-start justify-between gap-2 mb-3"></div>`);
+  promptRow.appendChild(el(`<div class="font-display text-lg leading-snug">${REFLECTION_PROMPTS[reflectPromptIndex]}</div>`));
+  const shuffleBtn = el(`<button class="text-xs text-[var(--ink-2)] hover:text-[var(--chalk)] flex-shrink-0" title="Try a different prompt">↻ Different prompt</button>`);
+  shuffleBtn.onclick = ()=>{ reflectPromptIndex = (reflectPromptIndex+1)%REFLECTION_PROMPTS.length; render(); };
+  promptRow.appendChild(shuffleBtn);
+  promptCard.appendChild(promptRow);
+
+  const textarea = el(`<textarea rows="5" placeholder="Write as much or as little as you want…"></textarea>`);
+  promptCard.appendChild(textarea);
+
+  const shareRow = el(`<label class="flex items-center gap-2 mt-3 cursor-pointer"></label>`);
+  const shareCheckbox = el(`<input type="checkbox" style="width:16px; height:16px;">`);
+  shareRow.appendChild(shareCheckbox);
+  shareRow.appendChild(el(`<span class="text-xs text-[var(--ink-2)]">Share this one with my coach</span>`));
+  promptCard.appendChild(shareRow);
+
+  const saveBtn = el(`<button class="btn btn-chalk px-4 py-2 rounded-lg text-sm mt-3">Save Reflection</button>`);
+  saveBtn.onclick = ()=>{
+    const text = textarea.value.trim();
+    if(!text) return;
+    if(!Array.isArray(state.reflectionLog)) state.reflectionLog = [];
+    state.reflectionLog.unshift({
+      id: genCode(8), date: todayISO(),
+      prompt: REFLECTION_PROMPTS[reflectPromptIndex],
+      text, sharedWithCoach: shareCheckbox.checked
+    });
+    reflectPromptIndex = Math.floor(Math.random()*REFLECTION_PROMPTS.length);
+    queueSave(); render();
+  };
+  promptCard.appendChild(saveBtn);
+  wrap.appendChild(promptCard);
+
+  const log = state.reflectionLog||[];
+  if(log.length){
+    wrap.appendChild(el(`<div class="label mt-6 mb-3">Your Past Reflections</div>`));
+    log.forEach(r=>{
+      const card = el(`<div class="card p-4 mb-3"></div>`);
+      const head = el(`<div class="flex items-center justify-between mb-1.5"></div>`);
+      head.appendChild(el(`<div class="text-xs font-mono text-[var(--ink-2)]">${r.date}</div>`));
+      if(r.sharedWithCoach) head.appendChild(el(`<div class="text-xs" style="color:var(--chalk);">Shared with coach</div>`));
+      card.appendChild(head);
+      card.appendChild(el(`<div class="text-sm font-medium mb-1.5">${r.prompt}</div>`));
+      card.appendChild(el(`<div class="text-sm text-[var(--ink-1)] leading-relaxed">${r.text}</div>`));
+      wrap.appendChild(card);
+    });
+  }
+
+  return wrap;
 }
 
 function renderProgress(){
@@ -5563,6 +5699,32 @@ function chartOpts(dual=false){
 
 /* ============================= NOTIFICATIONS ============================= */
 let notificationsOpen = false;
+// Implementation intentions only do their job if the plan is cued again at
+// the moment the obstacle actually happens (Gollwitzer) — not just stated
+// once at onboarding and forgotten. This checks for a newly-missed session
+// (not already reminded about) and, if the client set a plan, surfaces it
+// back to them via notification. Only ever the single most recent missed
+// date, so a bad week doesn't produce a pile of reminders.
+function checkIfThenPlanTrigger(){
+  if(!state.profile.ifThenPlan || !Array.isArray(state.program) || state.program.length===0) return;
+  if(!Array.isArray(state.ifThenNotifiedDates)) state.ifThenNotifiedDates = [];
+  const schedule = computeAdaptiveSchedule(todayISO());
+  const missed = schedule.filter(e=> e.status==='missed' && !state.ifThenNotifiedDates.includes(e.date));
+  if(missed.length===0) return;
+  const mostRecent = [...missed].sort((a,b)=> a.date<b.date?1:-1)[0];
+  const plan = IF_THEN_PLAN_OPTIONS.find(o=>o.key===state.profile.ifThenPlan);
+  if(!plan) return;
+
+  const messages = {
+    home_swap: `You missed ${mostRecent.dayName} on ${mostRecent.date}. You said if that happened, you'd do the At-Home version — want to do that now?`,
+    bodyweight_swap: `You missed ${mostRecent.dayName} on ${mostRecent.date}. You said if that happened, you'd do the Bodyweight-Only version — want to do that now?`,
+    reschedule: `You missed ${mostRecent.dayName} on ${mostRecent.date}. As planned, it's already been pushed to your next available slot — nothing extra needed.`,
+    rest_guiltfree: `You missed ${mostRecent.dayName} on ${mostRecent.date}. As planned, that's just a rest day — pick back up at your next session.`,
+  };
+  addNotification('About your missed session', messages[state.profile.ifThenPlan], {view:'workout', activatePlan:state.profile.ifThenPlan});
+  state.ifThenNotifiedDates.push(mostRecent.date);
+  queueSave();
+}
 function addNotification(title, message, link){
   state.notifications = state.notifications || [];
   state.notifications.unshift({
@@ -5601,6 +5763,12 @@ function renderNotificationBell(){
           item.onclick = ()=>{
             notificationsOpen = false;
             if(n.link.view==='checkinExplanation'){ state.activeCheckinLogId = n.link.logId; setView('checkinExplanation'); }
+            else if(n.link.view==='workout'){
+              setView('workout');
+              if(n.link.activatePlan==='home_swap') homeAltDayIndex[state.activeDayIndex] = 'home';
+              else if(n.link.activatePlan==='bodyweight_swap') homeAltDayIndex[state.activeDayIndex] = 'bodyweight';
+              render();
+            }
           };
         }
         panel.appendChild(item);
