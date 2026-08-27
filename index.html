@@ -214,6 +214,7 @@ let state = {
   checkinAdjustmentLog:[], // [{id, date, checkinId, weightDiffKg, changes:[{type,label,oldValue,newValue,reason}]}]
   reflectionLog:[], // [{id, date, prompt, text, sharedWithCoach}]
   ifThenNotifiedDates:[], // missed-session dates already reminded about, so the same one doesn't repeat
+  avNotifiedDates:[], // missed-session dates already given the abstinence-violation-effect reassurance
   mealPlan:{status:'idle', result:null, generatedAt:null},
   program:null,
   targets:null,
@@ -247,7 +248,7 @@ async function saveAll(){
       analysis:state.analysis, onboarded:state.onboarded, photos:state.photos,
       logs:state.logs, notifications:state.notifications, mealPlan:state.mealPlan,
       coachChatHistory:state.coachChatHistory, programExplanationSeen:state.programExplanationSeen,
-      checkinAdjustmentLog:state.checkinAdjustmentLog, ifThenNotifiedDates:state.ifThenNotifiedDates,
+      checkinAdjustmentLog:state.checkinAdjustmentLog, ifThenNotifiedDates:state.ifThenNotifiedDates, avNotifiedDates:state.avNotifiedDates,
       reflectionLog:state.reflectionLog,
       readinessSkippedDate:state.readinessSkippedDate, todayAdjustment:state.todayAdjustment, showingReadinessExplanation:state.showingReadinessExplanation
     }), true);
@@ -316,7 +317,7 @@ function freshClientState(){
     notifications:[],
     coachChatHistory:[],
     checkinAdjustmentLog:[], reflectionLog:[],
-    ifThenNotifiedDates:[],
+    ifThenNotifiedDates:[], avNotifiedDates:[],
     mealPlan:{status:'idle', result:null, generatedAt:null},
     program:null, targets:null, view:'dashboard', activeDayIndex:0,
     quoteQueue:[], showingQuoteFor:null,
@@ -340,6 +341,7 @@ async function loadClientState(id){
   ensureCheckinAdjustmentLog();
   ensureReflectionLog();
   ensureIfThenNotifiedDates();
+  ensureAvNotifiedDates();
   ensureReadinessLog();
   ensureProgramTechniques();
   ensureProgramWarmupCooldown();
@@ -351,6 +353,7 @@ async function loadClientState(id){
   ensureTargetSpec();
   ensureHeartRateLog();
   checkIfThenPlanTrigger();
+  checkAbstinenceViolationEffect();
   queueSave();
 }
 // Existing clients won't have a programStartDate saved (added alongside the
@@ -428,6 +431,9 @@ function ensureReflectionLog(){
 }
 function ensureIfThenNotifiedDates(){
   if(!Array.isArray(state.ifThenNotifiedDates)) state.ifThenNotifiedDates = [];
+}
+function ensureAvNotifiedDates(){
+  if(!Array.isArray(state.avNotifiedDates)) state.avNotifiedDates = [];
 }
 function ensureReadinessLog(){
   if(!Array.isArray(state.logs.readiness)) state.logs.readiness = [];
@@ -5851,6 +5857,31 @@ let notificationsOpen = false;
 // (not already reminded about) and, if the client set a plan, surfaces it
 // back to them via notification. Only ever the single most recent missed
 // date, so a bad week doesn't produce a pile of reminders.
+// Counters the well-documented "abstinence violation effect" — one missed
+// day often triggers a much bigger drop-off than the miss itself warrants
+// ("I already broke it, might as well write off the week"). Fires once, the
+// moment a session genuinely goes from due to missed, for every client
+// regardless of whether they've set an if-then plan (that notification is
+// action-oriented; this one is purely about not catastrophizing the miss).
+// Uses a real completed-session count rather than a generic platitude — but
+// only claims a track record that's actually been earned.
+function checkAbstinenceViolationEffect(){
+  if(!Array.isArray(state.program) || state.program.length===0) return;
+  if(!Array.isArray(state.avNotifiedDates)) state.avNotifiedDates = [];
+  const schedule = computeAdaptiveSchedule(todayISO());
+  const missed = schedule.filter(e=> e.status==='missed' && !state.avNotifiedDates.includes(e.date));
+  if(missed.length===0) return;
+  const mostRecent = [...missed].sort((a,b)=> a.date<b.date?1:-1)[0];
+
+  const totalCompleted = totalWorkoutsLogged();
+  const message = totalCompleted>=8
+    ? `One missed session doesn't undo the ${totalCompleted} you've already put in. The only thing that actually matters now is picking the next one back up.`
+    : `Missing a session isn't a big deal on its own — what matters is picking the next one back up, not the miss itself.`;
+  addNotification('About today', message, {view:'workout'});
+  state.avNotifiedDates.push(mostRecent.date);
+  queueSave();
+}
+
 function checkIfThenPlanTrigger(){
   if(!state.profile.ifThenPlan || !Array.isArray(state.program) || state.program.length===0) return;
   if(!Array.isArray(state.ifThenNotifiedDates)) state.ifThenNotifiedDates = [];
