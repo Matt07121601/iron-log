@@ -3579,7 +3579,43 @@ function renderWorkoutView(){
     wrap.appendChild(renderProtocolCard('🧊 Cool-Down', day.cooldown, 'Static stretching is appropriate here, now that the muscles are warm and training is finished.'));
   }
 
+  if(!workoutEditMode && doneSets>0){
+    wrap.appendChild(renderMentalStateCheckin(sessionLog));
+  }
+
   return wrap;
+}
+// Post-session mental-state tagging — a single tag per session, stored
+// alongside the same record as the real performance data (sets/reps/RPE),
+// so mental state and actual output can eventually be looked at together
+// rather than living in separate places. One tag, not a mood essay — low
+// friction is what makes this sustainable to log consistently.
+const MENTAL_STATE_TAGS = [
+  {key:'locked_in', label:'Locked In', emoji:'🎯'},
+  {key:'distracted', label:'Distracted', emoji:'💭'},
+  {key:'low_motivation', label:'Low Motivation', emoji:'🔋'},
+  {key:'anxious', label:'Anxious', emoji:'😬'},
+];
+function renderMentalStateCheckin(sessionLog){
+  const card = el(`<div class="card p-4 mb-4"></div>`);
+  if(sessionLog.mentalState){
+    const tag = MENTAL_STATE_TAGS.find(t=>t.key===sessionLog.mentalState);
+    card.appendChild(el(`<div class="text-sm text-[var(--ink-2)]">Logged how this session felt: <span style="color:var(--chalk);">${tag?tag.emoji+' '+tag.label:sessionLog.mentalState}</span></div>`));
+    const changeBtn = el(`<button class="text-xs text-[var(--ink-2)] hover:text-[var(--chalk)] mt-1.5">Change</button>`);
+    changeBtn.onclick = ()=>{ sessionLog.mentalState = null; queueSave(); render(); };
+    card.appendChild(changeBtn);
+    return card;
+  }
+  card.appendChild(el(`<div class="label mb-1">How Did That Feel, Mentally?</div>`));
+  card.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-3">One tag, that's it — over time this helps show how your mental state actually tracks with your output.</p>`));
+  const grid = el(`<div class="grid grid-cols-2 gap-2"></div>`);
+  MENTAL_STATE_TAGS.forEach(tag=>{
+    const btn = el(`<button class="p-3 rounded-lg border border-[var(--line)] text-center hover:border-[var(--chalk-dim)]"><div style="font-size:20px;">${tag.emoji}</div><div class="text-xs mt-1">${tag.label}</div></button>`);
+    btn.onclick = ()=>{ sessionLog.mentalState = tag.key; queueSave(); render(); };
+    grid.appendChild(btn);
+  });
+  card.appendChild(grid);
+  return card;
 }
 function renderProtocolCard(title, items, note){
   const card = el(`<div class="card p-4 mb-4"></div>`);
@@ -5566,6 +5602,35 @@ function renderProgress(){
     timelineCard.appendChild(el(`<div class="text-[var(--chalk)]">→</div>`));
     timelineCard.onclick = ()=> setView('checkinTimeline');
     wrap.appendChild(timelineCard);
+  }
+
+  // Mental state vs. output — only shown once there's enough tagged data for
+  // the averages to mean anything at all; with only a session or two tagged,
+  // an "average RPE" isn't a real signal yet, just noise.
+  const taggedSessions = Object.values(state.logs.workouts||{}).filter(w=>w.mentalState);
+  if(taggedSessions.length>=4){
+    const byTag = {};
+    MENTAL_STATE_TAGS.forEach(t=> byTag[t.key] = {count:0, rpeSum:0, rpeCount:0});
+    taggedSessions.forEach(w=>{
+      if(!byTag[w.mentalState]) return;
+      byTag[w.mentalState].count++;
+      Object.values(w.exercises||{}).forEach(sets=>{
+        (sets||[]).forEach(s=>{ if(s.done && s.rpe){ byTag[w.mentalState].rpeSum += parseFloat(s.rpe)||0; byTag[w.mentalState].rpeCount++; } });
+      });
+    });
+    const mentalCard = el(`<div class="card p-4 mb-6"></div>`);
+    mentalCard.appendChild(el(`<div class="label mb-1">Mental State vs. Output</div>`));
+    mentalCard.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-3">Average logged RPE by how each session felt — a genuine pattern needs a good few sessions per tag before it means much, so treat early numbers as a rough steer.</p>`));
+    MENTAL_STATE_TAGS.forEach(tag=>{
+      const d = byTag[tag.key];
+      if(d.count===0) return;
+      const avgRpe = d.rpeCount ? fmt1(d.rpeSum/d.rpeCount) : null;
+      const row = el(`<div class="flex items-center justify-between py-1.5 border-t border-[var(--line)] first:border-0"></div>`);
+      row.appendChild(el(`<div class="text-sm">${tag.emoji} ${tag.label} <span class="text-[var(--ink-2)]">(${d.count})</span></div>`));
+      row.appendChild(el(`<div class="text-sm font-mono text-[var(--ink-1)]">${avgRpe ? 'avg RPE '+avgRpe : '—'}</div>`));
+      mentalCard.appendChild(row);
+    });
+    wrap.appendChild(mentalCard);
   }
 
   // bodyweight chart
