@@ -215,6 +215,8 @@ let state = {
   reflectionLog:[], // [{id, date, prompt, text, sharedWithCoach}]
   ifThenNotifiedDates:[], // missed-session dates already reminded about, so the same one doesn't repeat
   avNotifiedDates:[], // missed-session dates already given the abstinence-violation-effect reassurance
+  forcedDeloadWeeks:[], // Monday-dates of weeks forced into deload by a detected plateau
+  plateauNotifiedKeys:[], // dayName|exerciseName plateau windows already addressed, so the same one doesn't re-trigger
   mealPlan:{status:'idle', result:null, generatedAt:null},
   program:null,
   targets:null,
@@ -249,6 +251,7 @@ async function saveAll(){
       logs:state.logs, notifications:state.notifications, mealPlan:state.mealPlan,
       coachChatHistory:state.coachChatHistory, programExplanationSeen:state.programExplanationSeen,
       checkinAdjustmentLog:state.checkinAdjustmentLog, ifThenNotifiedDates:state.ifThenNotifiedDates, avNotifiedDates:state.avNotifiedDates,
+      forcedDeloadWeeks:state.forcedDeloadWeeks, plateauNotifiedKeys:state.plateauNotifiedKeys,
       reflectionLog:state.reflectionLog,
       readinessSkippedDate:state.readinessSkippedDate, todayAdjustment:state.todayAdjustment, showingReadinessExplanation:state.showingReadinessExplanation
     }), true);
@@ -317,7 +320,7 @@ function freshClientState(){
     notifications:[],
     coachChatHistory:[],
     checkinAdjustmentLog:[], reflectionLog:[],
-    ifThenNotifiedDates:[], avNotifiedDates:[],
+    ifThenNotifiedDates:[], avNotifiedDates:[], forcedDeloadWeeks:[], plateauNotifiedKeys:[],
     mealPlan:{status:'idle', result:null, generatedAt:null},
     program:null, targets:null, view:'dashboard', activeDayIndex:0,
     quoteQueue:[], showingQuoteFor:null,
@@ -342,6 +345,7 @@ async function loadClientState(id){
   ensureReflectionLog();
   ensureIfThenNotifiedDates();
   ensureAvNotifiedDates();
+  ensurePlateauFields();
   ensureReadinessLog();
   ensureProgramTechniques();
   ensureProgramWarmupCooldown();
@@ -354,6 +358,7 @@ async function loadClientState(id){
   ensureHeartRateLog();
   checkIfThenPlanTrigger();
   checkAbstinenceViolationEffect();
+  checkPlateauIntervention();
   queueSave();
 }
 // Existing clients won't have a programStartDate saved (added alongside the
@@ -434,6 +439,10 @@ function ensureIfThenNotifiedDates(){
 }
 function ensureAvNotifiedDates(){
   if(!Array.isArray(state.avNotifiedDates)) state.avNotifiedDates = [];
+}
+function ensurePlateauFields(){
+  if(!Array.isArray(state.forcedDeloadWeeks)) state.forcedDeloadWeeks = [];
+  if(!Array.isArray(state.plateauNotifiedKeys)) state.plateauNotifiedKeys = [];
 }
 function ensureReadinessLog(){
   if(!Array.isArray(state.logs.readiness)) state.logs.readiness = [];
@@ -1433,7 +1442,26 @@ function computePeriodization(profile, dayIndex, asOfDate){
       : `Building — week ${weekInMesocycle} of ${progressiveWeeks} before your next deload`;
   }
   const microcycle = isDeload ? {label:'', repShift:0, rirShift:0} : computeMicrocycle(profile, dayIndex);
-  return {weekNumber, weekInMesocycle, mesocycleLength:mesoLength, mesocycleNumber, isDeload, setMultiplier, rirAdjustment, phaseLabel, microcycle, daysElapsed};
+  // Plateau-triggered early deload — purely additive on top of the normal
+  // calendar math above, never rewriting it. Deliberately doesn't touch
+  // programStartDate or the week/mesocycle numbers, so it can't retroactively
+  // change how any past date is classified — it just marks this one specific
+  // week as an extra, earned deload on top of whatever was already scheduled.
+  let finalIsDeload = isDeload, finalSetMultiplier = setMultiplier, finalRirAdjustment = rirAdjustment, finalPhaseLabel = phaseLabel, finalMicrocycle = microcycle;
+  if(!isDeload && typeof state!=='undefined' && Array.isArray(state.forcedDeloadWeeks)){
+    const weekKey = mondayOfWeek(evalDate);
+    if(state.forcedDeloadWeeks.includes(weekKey)){
+      finalIsDeload = true; finalSetMultiplier = 0.5; finalRirAdjustment = 2;
+      finalPhaseLabel = 'Plateau deload — an extra planned recovery week to help you break through and keep progressing';
+      finalMicrocycle = {label:'', repShift:0, rirShift:0};
+    }
+  }
+  return {weekNumber, weekInMesocycle, mesocycleLength:mesoLength, mesocycleNumber, isDeload:finalIsDeload, setMultiplier:finalSetMultiplier, rirAdjustment:finalRirAdjustment, phaseLabel:finalPhaseLabel, microcycle:finalMicrocycle, daysElapsed};
+}
+function mondayOfWeek(dateStr){
+  const dow = new Date(dateStr+'T00:00:00').getDay();
+  const daysSinceMonday = (dow+6)%7;
+  return addDaysISO(dateStr, -daysSinceMonday);
 }
 // Macrocycle: the big-picture view — how many mesocycles have passed, and
 // (when the client has done a physique comparison with a timeframe estimate)
@@ -1657,9 +1685,9 @@ function suggestNextWeight(dayName, exerciseName, repRange){
 
   let mult, reason;
   if(avgReps < repMin){
-    mult = 0.95; reason = 'reps fell short of target range — slight decrease to hit reps next time';
+    mult = 0.95; reason = 'reps fell short of target range — happens for all kinds of reasons (sleep, stress, a hard week), not a sign of reduced ability. Slight decrease to hit reps next time';
   } else if(avgRpe >= 9.5){
-    mult = 0.95; reason = 'RPE was very high — small deload';
+    mult = 0.95; reason = 'RPE was very high that session — a small step back here is normal load management, not a setback. Small deload';
   } else if(avgReps >= repMax && avgRpe <= 8){
     mult = 1.05; reason = 'hit the top of the rep range with room to spare — increase load';
   } else if(avgRpe <= 7){
@@ -2174,6 +2202,18 @@ function renderCoachTools(){
   const badge = el(`<div class="card p-3 mb-4"></div>`);
   badge.appendChild(el(`<div class="text-xs font-mono" style="color:var(--chalk);">Coach view — editing ${state.profile.name}'s data</div>`));
   wrap.appendChild(badge);
+
+  const currentPlateaus = detectPlateauedExercises();
+  if(currentPlateaus.length){
+    const pCard = el(`<div class="card p-4 mb-4" style="border-color:var(--alert);"></div>`);
+    pCard.appendChild(el(`<div class="label mb-1" style="color:var(--alert);">Plateau — Further Options</div>`));
+    pCard.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-3">The app already auto-applied exercise variation (and an early deload, if warranted) for these. Two further evidence-based options exist but are kept as suggestions rather than automatic, since they're a bigger call:</p>`));
+    currentPlateaus.forEach(p=>{
+      pCard.appendChild(el(`<div class="text-sm font-medium mb-1">${p.exName} (${p.dayName}) — stuck at ${p.priorMax}${state.profile.weightUnit||'kg'}</div>`));
+    });
+    pCard.appendChild(el(`<ul class="text-xs text-[var(--ink-2)] list-disc pl-4 mt-2 space-y-1"><li><b>Rep-range cycling</b> — temporarily shift the target rep range (e.g. into a 15-20 or 4-6 zone) for a genuinely different stimulus.</li><li><b>Planned overreaching</b> — a brief, deliberate volume/intensity spike beyond normal before backing off. Higher risk if unsupervised — worth your judgment on whether this specific client is a good candidate.</li></ul>`));
+    wrap.appendChild(pCard);
+  }
 
   const sharedReflections = (state.reflectionLog||[]).filter(r=>r.sharedWithCoach);
   if(sharedReflections.length){
@@ -5184,7 +5224,7 @@ const COACH_KB = [
     a:'Dynamic stretching (moving through a range of motion, like leg swings or arm circles) is generally better before lifting — static stretching (holding a stretch still) right before heavy lifting has been shown to temporarily reduce force output. Static stretching is a better fit after your session, once you\'re warm and finished, which is exactly how your program\'s warm-up and cool-down are structured.'},
   {id:'plateau', cat:'Training Principles', keywords:['plateau','stopped progressing','not seeing results','stuck at same weight'],
     q:'I feel like I\'ve plateaued — what should I do?',
-    a:'A few common causes: not enough progressive overload over time, insufficient recovery (sleep, calories, or stress), or simply needing a deload if fatigue has quietly built up. Check your logged history in the Progress tab for a real trend rather than a single bad session — genuine plateaus usually take several weeks of flat numbers to confirm, not one off day.'},
+    a:'Worth saying first: a plateau is almost never a sign you\'ve stopped being capable of progress — it\'s a controllable, fixable thing, not a fixed trait. A few common causes: not enough progressive overload over time, insufficient recovery (sleep, calories, or stress), or simply needing a deload if fatigue has quietly built up. Check your logged history in the Progress tab for a real trend rather than a single bad session — genuine plateaus usually take several weeks of flat numbers to confirm, not one off day.'},
 
   {id:'doms', cat:'Recovery', keywords:['doms','muscle soreness','sore muscles','why am i sore'],
     q:'What is DOMS and is it necessary for progress?',
@@ -5865,6 +5905,101 @@ let notificationsOpen = false;
 // action-oriented; this one is purely about not catastrophizing the miss).
 // Uses a real completed-session count rather than a generic platitude — but
 // only claims a track record that's actually been earned.
+/* ============================= PLATEAU DETECTION & INTERVENTION ============================= */
+// A plateau is defined conservatively — 5 consecutive logged sessions on an
+// exercise without beating the best weight achieved before that window. One
+// stalled session is normal variation (sleep, stress, a hard week); this
+// only fires on a genuinely sustained pattern, matching the same "several
+// weeks of flat numbers, not one off day" standard already used in the
+// Coach tab's plateau guidance.
+const PLATEAU_WINDOW = 5;
+function detectPlateauedExercises(){
+  const exerciseSessions = {};
+  Object.values(state.logs.workouts||{}).forEach(w=>{
+    Object.entries(w.exercises||{}).forEach(([exName, sets])=>{
+      const done = (sets||[]).filter(s=>s.done && s.weight);
+      if(done.length===0) return;
+      const maxW = Math.max(...done.map(s=>parseFloat(s.weight)||0));
+      const key = w.dayName+'|'+exName;
+      if(!exerciseSessions[key]) exerciseSessions[key] = [];
+      exerciseSessions[key].push({date:w.date, maxWeight:maxW, dayName:w.dayName, exName});
+    });
+  });
+  const plateaus = [];
+  Object.entries(exerciseSessions).forEach(([key, sessions])=>{
+    if(sessions.length < PLATEAU_WINDOW+2) return; // need real history before the window too
+    const sorted = [...sessions].sort((a,b)=> a.date<b.date?-1:1);
+    const recent = sorted.slice(-PLATEAU_WINDOW);
+    const prior = sorted.slice(0,-PLATEAU_WINDOW);
+    const priorMax = Math.max(...prior.map(s=>s.maxWeight));
+    const recentMax = Math.max(...recent.map(s=>s.maxWeight));
+    if(recentMax <= priorMax){
+      plateaus.push({key, dayName:recent[0].dayName, exName:recent[0].exName, priorMax, lastDate:recent[recent.length-1].date});
+    }
+  });
+  return plateaus;
+}
+// Finds a same-muscle-group alternative from the client's own equipment tier
+// — genuinely evidence-supported: repeated exposure to an identical exercise
+// can lead to accommodation, and a related-but-novel stimulus is standard,
+// low-risk plateau-breaking practice.
+function findVariationForExercise(exName, muscleGroup, equipment, existingNamesInDay){
+  const lib = EX[equipment] || EX.gym;
+  const all = [];
+  Object.values(lib).forEach(pool=> pool.forEach(e=> all.push(e)));
+  const exclude = new Set([exName, ...(existingNamesInDay||[])]);
+  const candidates = all.filter(e=> e.m===muscleGroup && !exclude.has(e.n));
+  return candidates.length ? candidates[0] : null;
+}
+// Automatically applies the two lowest-risk, best-evidenced interventions —
+// exercise variation always, and pulling the deload forward only if there's
+// been enough time in the current block for real fatigue to plausibly have
+// built up. Rep-range cycling and deliberate overreaching are deliberately
+// NOT automated here — surfaced to the coach as a suggestion instead, since
+// they're a bigger judgment call than a routine swap or an early recovery
+// week.
+function checkPlateauIntervention(){
+  if(!Array.isArray(state.program) || state.program.length===0) return;
+  if(!Array.isArray(state.plateauNotifiedKeys)) state.plateauNotifiedKeys = [];
+  if(!Array.isArray(state.forcedDeloadWeeks)) state.forcedDeloadWeeks = [];
+  const plateaus = detectPlateauedExercises();
+  const newPlateaus = plateaus.filter(p=> !state.plateauNotifiedKeys.includes(p.key+'|'+p.lastDate));
+  if(newPlateaus.length===0) return;
+
+  newPlateaus.forEach(p=>{
+    const day = state.program.find(d=>d.name===p.dayName);
+    if(!day) return;
+    const exercise = day.exercises.find(e=>e.name===p.exName);
+    if(!exercise) return;
+    const existingNames = day.exercises.map(e=>e.name);
+    const variation = findVariationForExercise(p.exName, exercise.muscle, state.profile.equipment, existingNames);
+
+    const actions = [];
+    if(variation){
+      exercise.name = variation.n;
+      actions.push(`swapped ${p.exName} for ${variation.n} (same muscle group, a genuinely different stimulus)`);
+    }
+
+    const periodization = computePeriodization(state.profile);
+    const pastMidpoint = periodization.weekInMesocycle >= Math.ceil(periodization.mesocycleLength/2);
+    if(pastMidpoint && !periodization.isDeload){
+      const weekKey = mondayOfWeek(todayISO());
+      if(!state.forcedDeloadWeeks.includes(weekKey)) state.forcedDeloadWeeks.push(weekKey);
+      actions.push(`brought this week's deload forward, since real fatigue is likely part of the picture this deep into your current block`);
+    }
+
+    if(actions.length){
+      addNotification(
+        'Your program has been adjusted',
+        `${p.exName} hasn't beaten your best of ${p.priorMax}${state.profile.weightUnit||'kg'} in ${PLATEAU_WINDOW} sessions — a genuine plateau, not just an off day. We've ${actions.join(', and ')}.`,
+        {view:'workout'}
+      );
+    }
+    state.plateauNotifiedKeys.push(p.key+'|'+p.lastDate);
+  });
+  queueSave();
+}
+
 function checkAbstinenceViolationEffect(){
   if(!Array.isArray(state.program) || state.program.length===0) return;
   if(!Array.isArray(state.avNotifiedDates)) state.avNotifiedDates = [];
@@ -6470,21 +6605,24 @@ function applyCheckinAdjustments(checkin){
 
   const changes = [];
   const weightDirection = weightDiffKg>0 ? 'up' : 'down';
+  const goalsListForReason = (Array.isArray(p.goals) && p.goals.length) ? p.goals : (p.goal ? [p.goal] : []);
+  const isHarderNewsWeight = (goalsListForReason.includes('fatloss') && weightDiffKg>0) || (goalsListForReason.includes('muscle') && weightDiffKg<0);
   if(oldTargets && newTargets){
     const calorieDiff = Math.round(newTargets.calories - oldTargets.calories);
     if(Math.abs(calorieDiff) >= 50){
       changes.push({
         type:'nutrition', label:'Nutrition Targets',
         oldValue:`${Math.round(oldTargets.calories)} kcal/day`, newValue:`${Math.round(newTargets.calories)} kcal/day`,
-        reason:`Your weight is ${weightDirection} ${Math.abs(weightDiffKg)}${p.weightUnit==='lb'?'lb':'kg'} since your last update. Calorie and macro targets are calculated from current weight, so they've been recalculated to keep your ${(oldCalKey||'').includes('cut')||calorieDiff<0?'deficit':'surplus'} accurate rather than drifting off target as your weight changes.`
+        reason:`Your weight is ${weightDirection} ${Math.abs(weightDiffKg)}${p.weightUnit==='lb'?'lb':'kg'} since your last update.${isHarderNewsWeight?" Worth saying plainly: a week like this is usually water retention, sleep, or stress, not a sign anything's gone wrong — one data point isn't a trend.":''} Calorie and macro targets are calculated from current weight, so they've been recalculated to keep your ${(oldCalKey||'').includes('cut')||calorieDiff<0?'deficit':'surplus'} accurate rather than drifting off target as your weight changes.`
       });
     }
   }
   if(Math.abs(newCardioMin - oldCardioMin) >= 15){
+    const cardioIncreased = newCardioMin>oldCardioMin;
     changes.push({
       type:'cardio', label:'Weekly Cardio',
       oldValue:`~${oldCardioMin} min/week`, newValue:`~${newCardioMin} min/week`,
-      reason:`Your updated weight changed the estimated gap to your target physique, so your weekly cardio volume has been recalculated to match — ${newCardioMin>oldCardioMin ? 'a bit more than before' : 'less than before, since less is now needed'}.`
+      reason:`Your updated weight changed the estimated gap to your target physique, so your weekly cardio volume has been recalculated to match — ${cardioIncreased ? "a bit more than before. That's just the maths adjusting to where you are today, not a judgment on how things are going" : 'less than before, since less is now needed'}.`
     });
   }
 
