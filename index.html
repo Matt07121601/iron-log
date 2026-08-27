@@ -2923,6 +2923,18 @@ function renderDashboard(){
   const calKey = profileCalorieKey(state.profile);
   const active = t[calKey];
 
+  const wins = detectRecentWins();
+  if(wins.length){
+    const win = wins[0];
+    const winCard = el(`<div class="card p-4 mb-5" style="border-color:var(--chalk-dim); background:var(--bg-2);"></div>`);
+    const winHead = el(`<div class="flex items-center gap-2 mb-1.5"></div>`);
+    winHead.appendChild(el(`<span style="font-size:16px;">🏆</span>`));
+    winHead.appendChild(el(`<span class="label" style="color:var(--chalk);">Recognized</span>`));
+    winCard.appendChild(winHead);
+    winCard.appendChild(el(`<div class="text-sm text-[var(--ink-1)] leading-relaxed">${win.text}</div>`));
+    wrap.appendChild(winCard);
+  }
+
   wrap.appendChild(el(`
     <div class="card p-5 mb-5">
       <div class="flex items-center justify-between mb-1">
@@ -5129,6 +5141,93 @@ function matchCoachKB(query){
 }
 
 /* ============================= PROFILE ============================= */
+/* ============================= RECOGNIZED WINS (SELF-EFFICACY) ============================= */
+// Bandura's self-efficacy theory identifies genuine "mastery experiences" —
+// real, specific evidence of capability — as the strongest driver of
+// self-belief, well above generic encouragement. Every detector here is
+// built from real logged data; there is no templated praise, and nothing
+// fires when there's genuinely nothing to report. Only the single most
+// relevant, freshest win is ever surfaced, so it keeps its impact rather
+// than becoming background noise.
+function detectRecentWins(){
+  const wins = [];
+  const today = todayISO();
+  const recentCutoff = addDaysISO(today, -2);
+
+  // Build a per-exercise session history from real logs: date + the actual
+  // heaviest weight logged that session (only counting completed sets).
+  const exerciseSessions = {};
+  Object.values(state.logs.workouts||{}).forEach(w=>{
+    Object.entries(w.exercises||{}).forEach(([exName, sets])=>{
+      const done = (sets||[]).filter(s=>s.done && s.weight);
+      if(done.length===0) return;
+      const maxW = Math.max(...done.map(s=>parseFloat(s.weight)||0));
+      const key = w.dayName+'|'+exName;
+      if(!exerciseSessions[key]) exerciseSessions[key] = [];
+      exerciseSessions[key].push({date:w.date, maxWeight:maxW, exName});
+    });
+  });
+
+  // 1. Progressive overload streak — actual logged weight increased across
+  // the last 3 consecutive sessions for the same exercise. This is the exact
+  // "3 sessions running" case — genuine, not a suggestion, not a prediction.
+  Object.values(exerciseSessions).forEach(sessions=>{
+    if(sessions.length<3) return;
+    const sorted = [...sessions].sort((a,b)=> a.date<b.date?-1:1);
+    const lastThree = sorted.slice(-3);
+    if(lastThree[2].date < recentCutoff) return;
+    if(lastThree[0].maxWeight < lastThree[1].maxWeight && lastThree[1].maxWeight < lastThree[2].maxWeight){
+      wins.push({
+        type:'overload_streak', priority:2, date:lastThree[2].date,
+        text:`You've increased your ${lastThree[2].exName} weight for 3 sessions running (${lastThree[0].maxWeight} → ${lastThree[1].maxWeight} → ${lastThree[2].maxWeight}${state.profile.weightUnit||'kg'}) — real, logged progress.`
+      });
+    }
+  });
+
+  // 2. All-time weight PR on any exercise, logged in the last 2 days.
+  const allTimeMax = {};
+  Object.values(exerciseSessions).forEach(sessions=>{
+    sessions.forEach(s=>{
+      if(!allTimeMax[s.exName] || s.maxWeight > allTimeMax[s.exName].weight){
+        allTimeMax[s.exName] = {weight:s.maxWeight, date:s.date};
+      }
+    });
+  });
+  Object.entries(allTimeMax).forEach(([exName, rec])=>{
+    if(rec.date >= recentCutoff){
+      wins.push({
+        type:'pr', priority:1, date:rec.date,
+        text:`New personal best on ${exName}: ${rec.weight}${state.profile.weightUnit||'kg'} — your heaviest logged yet.`
+      });
+    }
+  });
+
+  // 3. Consistency streak, only at meaningful milestones — not every day,
+  // so it stays a genuine moment rather than constant background praise.
+  const streak = computeCurrentStreak();
+  if([5,10,15,20,25,30,40,50,75,100].includes(streak)){
+    wins.push({
+      type:'streak', priority:3, date:today,
+      text:`${streak} sessions completed in a row, right on schedule — real consistency, not just intention.`
+    });
+  }
+
+  // 4. Just completed a full training block (mesocycle, deload included).
+  if(Array.isArray(state.program) && state.program.length){
+    const periodization = computePeriodization(state.profile);
+    if(periodization.weekInMesocycle===1 && periodization.mesocycleNumber>1 && (periodization.daysElapsed%7)<2){
+      const completed = periodization.mesocycleNumber-1;
+      wins.push({
+        type:'block', priority:4, date:today,
+        text:`You've completed ${completed} full training block${completed>1?'s':''}, deload weeks included — structural progress, not just motivation.`
+      });
+    }
+  }
+
+  wins.sort((a,b)=> a.priority-b.priority || (a.date<b.date?1:-1));
+  return wins;
+}
+
 function computeCurrentStreak(){
   const schedule = computeAdaptiveSchedule(todayISO());
   const pastEntries = schedule.filter(e=> e.status==='completed' || e.status==='missed').sort((a,b)=> a.date<b.date?1:-1);
