@@ -2988,6 +2988,27 @@ function renderDashboard(){
     wrap.appendChild(winCard);
   }
 
+  const trainingGoal = computeTrainingProcessGoal();
+  const proteinGoal = computeProteinProcessGoal();
+  if(trainingGoal || proteinGoal){
+    const pgCard = el(`<div class="card p-4 mb-5"></div>`);
+    pgCard.appendChild(el(`<div class="label mb-1">This Week's Process Goals</div>`));
+    pgCard.appendChild(el(`<p class="text-xs text-[var(--ink-2)] mb-3">Things fully within your control — worth feeling good about even on a week the scale or the mirror doesn't cooperate.</p>`));
+    const goalRow = (label, completed, total, unit)=>{
+      const done = completed>=total;
+      const row = el(`<div class="flex items-center justify-between py-2 border-t border-[var(--line)] first:border-0"></div>`);
+      const left = el(`<div class="flex items-center gap-2"></div>`);
+      left.appendChild(el(`<span style="color:${done?'var(--chalk)':'var(--ink-2)'};">${done?'✓':'○'}</span>`));
+      left.appendChild(el(`<span class="text-sm ${done?'':'text-[var(--ink-1)]'}">${label}</span>`));
+      row.appendChild(left);
+      row.appendChild(el(`<span class="text-xs font-mono text-[var(--ink-2)]">${completed} / ${total} ${unit}</span>`));
+      return row;
+    };
+    if(trainingGoal) pgCard.appendChild(goalRow('Complete every prescribed set this week', trainingGoal.completed, trainingGoal.total, 'sets'));
+    if(proteinGoal) pgCard.appendChild(goalRow(`Hit your protein target (${proteinGoal.target}g)`, proteinGoal.completed, proteinGoal.total, 'days'));
+    wrap.appendChild(pgCard);
+  }
+
   wrap.appendChild(el(`
     <div class="card p-5 mb-5">
       <div class="flex items-center justify-between mb-1">
@@ -5238,6 +5259,66 @@ function matchCoachKB(query){
 // fires when there's genuinely nothing to report. Only the single most
 // relevant, freshest win is ever surfaced, so it keeps its impact rather
 // than becoming background noise.
+/* ============================= PROCESS GOALS ============================= */
+// Locke & Latham's goal-setting research, and a lot of applied sport
+// psychology since, consistently shows process goals — behaviors fully
+// within someone's control — sustain motivation better than outcome goals
+// alone, precisely because outcome measures (weight, the mirror) get muddied
+// by water retention, sleep, and stress in a way a completed set or a
+// logged protein target simply isn't. Deliberately kept separate from the
+// physique/weight tracking elsewhere in the app, and computed live from real
+// logs, not a separate thing the client has to remember to update.
+function currentWeekDates(){
+  const today = todayISO();
+  const dow = new Date(today+'T00:00:00').getDay();
+  const daysSinceMonday = (dow+6)%7;
+  const weekStart = addDaysISO(today, -daysSinceMonday);
+  const dates = [];
+  for(let i=0;i<7;i++) dates.push(addDaysISO(weekStart,i));
+  return dates;
+}
+function computeTrainingProcessGoal(){
+  if(!Array.isArray(state.program) || state.program.length===0) return null;
+  const weekDates = currentWeekDates();
+  const weekEnd = weekDates[6];
+  const schedule = computeAdaptiveSchedule(weekEnd).filter(e=> weekDates.includes(e.date));
+  if(schedule.length===0) return null;
+
+  let prescribedSets = 0, completedSets = 0;
+  schedule.forEach(entry=>{
+    const day = state.program.find(d=>d.name===entry.dayName);
+    if(!day) return;
+    const periodization = computePeriodization(state.profile, null, entry.date);
+    day.exercises.forEach(ex=>{
+      if(ex.muscle==='Conditioning') return;
+      prescribedSets += applyPeriodizationToExercise(ex, periodization).sets;
+    });
+    const log = state.logs.workouts[entry.dayName+'-'+entry.date];
+    if(log){
+      Object.values(log.exercises||{}).forEach(sets=>{
+        completedSets += (sets||[]).filter(s=>s.done).length;
+      });
+    }
+  });
+  if(prescribedSets===0) return null;
+  return {completed: Math.min(completedSets, prescribedSets), total: prescribedSets};
+}
+function computeProteinProcessGoal(){
+  const calKey = profileCalorieKey(state.profile);
+  const targets = state.targets ? state.targets[calKey] : null;
+  const proteinTarget = targets && targets.protein ? targets.protein.g : null;
+  if(!proteinTarget) return null;
+  const weekDates = currentWeekDates().filter(d=> d<=todayISO());
+  if(weekDates.length===0) return null;
+  let daysHit = 0;
+  weekDates.forEach(d=>{
+    const entries = state.logs.food[d] || [];
+    const totalProtein = entries.reduce((s,e)=> s+(parseFloat(e.protein)||0), 0);
+    if(totalProtein >= proteinTarget*0.9) daysHit++; // within 90% counts as hit — not a razor-edge pass/fail
+  });
+  return {completed: daysHit, total: weekDates.length, target: proteinTarget};
+}
+
 function detectRecentWins(){
   const wins = [];
   const today = todayISO();
