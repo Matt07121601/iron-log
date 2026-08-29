@@ -7,13 +7,13 @@
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Fraunces:ital,opsz,wght@1,9..144,400;1,9..144,500;1,9..144,600&display=swap" rel="stylesheet">
 <style>
   :root{
-    --bg-0:#111113; --bg-1:#1B1B1E; --bg-2:#232326; --bg-3:#2C2C30;
-    --line:#38383C;
+    --bg-0:#0A0F0C; --bg-1:#121712; --bg-2:#1A211B; --bg-3:#232B24;
+    --line:#2A322B;
     --ink-0:#F3F2EC; --ink-1:#B8B7B0; --ink-2:#7C7B76;
-    --chalk:#E8C547; --chalk-dim:#8A7A33; --chalk-light:#F5DE7E; --chalk-text:#1B1B1E; --chalk-hover:#F0D566;
+    --chalk:#3DDC97; --chalk-dim:#1F6B49; --chalk-light:#7CEAB8; --chalk-text:#0A0F0C; --chalk-hover:#4FE3A5;
     --alert:#E85D3F;
     --ok:#6FCF97;
     --steel:#5B6B7C;
@@ -21,6 +21,7 @@
   *{box-sizing:border-box;}
   html,body{background:var(--bg-0); color:var(--ink-0); font-family:'Inter',sans-serif; -webkit-tap-highlight-color:transparent;}
   .font-display{font-family:'Oswald',sans-serif; letter-spacing:0.02em;}
+  .font-serif{font-family:'Fraunces',serif; font-style:italic; font-weight:500; letter-spacing:0;}
   .font-mono{font-family:'JetBrains Mono',monospace;}
   ::-webkit-scrollbar{width:8px; height:8px;}
   ::-webkit-scrollbar-thumb{background:var(--bg-3); border-radius:4px;}
@@ -28,7 +29,7 @@
   .plate{border-radius:9999px; border:3px solid var(--chalk-dim);}
   .plate.filled{border-color:var(--chalk); background:radial-gradient(circle at 35% 30%, var(--chalk-light), var(--chalk) 60%);}
   .card{background:var(--bg-1); border:1px solid var(--line); border-radius:10px;}
-  .btn{font-family:'Oswald',sans-serif; letter-spacing:0.04em; text-transform:uppercase; font-weight:600; transition:transform .12s ease, background .15s ease;}
+  .btn{font-family:'Oswald',sans-serif; letter-spacing:0.04em; text-transform:uppercase; font-weight:600; transition:transform .12s ease, background .15s ease; border-radius:999px !important;}
   .btn:active{transform:scale(0.97);}
   .btn-chalk{background:var(--chalk); color:var(--chalk-text);}
   .btn-chalk:hover{background:var(--chalk-hover);}
@@ -47,7 +48,8 @@
   .quote-overlay{position:fixed; inset:0; z-index:60; background:linear-gradient(180deg,#0c0c0d,#141416); display:flex; align-items:center; justify-content:center;}
   .fade-out{animation:fadeOut .6s ease forwards;}
   @keyframes fadeOut{to{opacity:0; visibility:hidden;}}
-  .set-row.done{background:rgba(111,207,151,0.08); border-color:rgba(111,207,151,0.35);}
+  .set-row.done{background:var(--chalk); border-color:var(--chalk); color:var(--chalk-text);}
+  .set-row.done input{color:var(--chalk-text); background:transparent;}
   .spin{animation:spin 1s linear infinite;}
   @keyframes spin{to{transform:rotate(360deg);}}
   .checker{background-image: linear-gradient(45deg, var(--bg-2) 25%, transparent 25%), linear-gradient(-45deg, var(--bg-2) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, var(--bg-2) 75%), linear-gradient(-45deg, transparent 75%, var(--bg-2) 75%); background-size: 16px 16px; background-position: 0 0, 0 8px, 8px -8px, -8px 0px;}
@@ -84,9 +86,10 @@
 <div id="achievementOverlay" class="hidden fixed inset-0 z-50" style="background:linear-gradient(180deg,#0c0c0d,#141416); overflow:hidden;">
   <div id="achievementStars" style="position:absolute; inset:0; pointer-events:none;"></div>
   <div class="w-full h-full flex flex-col items-center justify-center" style="position:relative;">
-    <div style="font-size:min(20vw,90px); line-height:1; color:var(--chalk);">★</div>
-    <div class="label mt-4" style="color:var(--chalk);">New Personal Best</div>
-    <div id="achievementText" class="font-display text-2xl font-bold mt-2 text-center px-6"></div>
+    <div style="font-size:min(20vw,90px); line-height:1; color:#E8B94A;">★</div>
+    <div class="font-serif text-3xl mt-4" style="color:#E8B94A;">New best</div>
+    <div id="achievementText" class="text-lg mt-2 text-center px-6" style="color:var(--ink-1);"></div>
+    <div class="text-xs mt-6" style="color:var(--ink-2);">tap to close</div>
   </div>
 </div>
 
@@ -644,14 +647,19 @@ function el(html){ const t=document.createElement('template'); t.innerHTML=html.
 // Applied only once a client has actively selected a gender — before that, the app
 // stays on the neutral chalk-gold default (see profile.gender initial value: '').
 const THEMES = {
-  default: { chalk:'#E8C547', chalkDim:'#8A7A33', chalkLight:'#F5DE7E', chalkText:'#1B1B1E', chalkHover:'#F0D566', rgb:'232,197,71' },
-  male:    { chalk:'#4169E1', chalkDim:'#2C3E8C', chalkLight:'#93A9F2', chalkText:'#F3F2EC', chalkHover:'#5578E8', rgb:'65,105,225' },
-  female:  { chalk:'#E0218F', chalkDim:'#7A1050', chalkLight:'#F27FC0', chalkText:'#F3F2EC', chalkHover:'#EA4CA5', rgb:'224,33,143' }
+  default: { chalk:'#3DDC97', chalkDim:'#1F6B49', chalkLight:'#7CEAB8', chalkText:'#0A0F0C', chalkHover:'#4FE3A5', rgb:'61,220,151' },
+  male:    { chalk:'#3DDC97', chalkDim:'#1F6B49', chalkLight:'#7CEAB8', chalkText:'#0A0F0C', chalkHover:'#4FE3A5', rgb:'61,220,151' },
+  female:  { chalk:'#3DDC97', chalkDim:'#1F6B49', chalkLight:'#7CEAB8', chalkText:'#0A0F0C', chalkHover:'#4FE3A5', rgb:'61,220,151' }
 };
+// Achievement/PR moments get their own fixed gold, deliberately separate from
+// the mint accent above — a dual-accent split: one color for the interface,
+// a different one reserved specifically for "this is worth noticing".
+const ACHIEVEMENT_GOLD = '#E8B94A';
+const ACHIEVEMENT_GOLD_LIGHT = '#F5D584';
 // Base surface/text palette for light vs dark mode. Swapping just these CSS
 // variables recolors the whole app, since every existing style already reads
 // from var(--bg-*)/var(--ink-*)/var(--line) rather than hardcoded colors.
-const DARK_PALETTE = {'--bg-0':'#111113', '--bg-1':'#1B1B1E', '--bg-2':'#232326', '--bg-3':'#2C2C30', '--line':'#38383C', '--ink-0':'#F3F2EC', '--ink-1':'#B8B7B0', '--ink-2':'#7C7B76'};
+const DARK_PALETTE = {'--bg-0':'#0A0F0C', '--bg-1':'#121712', '--bg-2':'#1A211B', '--bg-3':'#232B24', '--line':'#2A322B', '--ink-0':'#F3F2EC', '--ink-1':'#B8B7B0', '--ink-2':'#7C7B76'};
 const LIGHT_PALETTE = {'--bg-0':'#F7F6F2', '--bg-1':'#FFFFFF', '--bg-2':'#EFEDE7', '--bg-3':'#E2DFD6', '--line':'#DAD7CD', '--ink-0':'#1B1B1E', '--ink-1':'#4A4944', '--ink-2':'#84827A'};
 function currentTheme(){
   return THEMES[state.profile.gender] || THEMES.default;
@@ -3539,6 +3547,10 @@ function renderWorkoutView(){
   const usingAlt = !workoutEditMode && activeTier && availableTiers.includes(activeTier);
   const day = applyReadinessToDay(usingAlt ? buildEquipmentEquivalentDay(gymDay, activeTier) : gymDay, state.todayAdjustment);
 
+  if(!workoutEditMode){
+    wrap.appendChild(el(`<h1 class="font-serif text-4xl sm:text-5xl mb-4">${day.name}</h1>`));
+  }
+
   if(!workoutEditMode && state.todayAdjustment && state.todayAdjustment.status==='done' && state.todayAdjustment.setMultiplier<1){
     const banner = el(`<div class="p-3 rounded-lg mb-4" style="background:var(--bg-2); border:1px solid ${state.todayAdjustment.tier==='low'?'var(--alert)':'var(--chalk-dim)'};"></div>`);
     banner.appendChild(el(`<div class="text-sm" style="color:${state.todayAdjustment.tier==='low'?'var(--alert)':'var(--chalk)'};">⚡ Adjusted for today's recovery — sets and RIR modified below.</div>`));
@@ -3728,7 +3740,7 @@ function renderExerciseCard(day, ex, sessionLog, insideGroup){
   const head = el(`<div class="flex items-start justify-between mb-1"></div>`);
   const titleWrap = el(`<div></div>`);
   const titleRow = el(`<div class="flex items-center gap-2"></div>`);
-  const link = el(`<a href="${videoLink(ex.name)}" target="_blank" rel="noopener" class="font-display text-lg font-semibold hover:text-[var(--chalk)] underline decoration-[var(--chalk-dim)] decoration-2 underline-offset-4">${ex.name}</a>`);
+  const link = el(`<a href="${videoLink(ex.name)}" target="_blank" rel="noopener" class="font-serif text-xl hover:text-[var(--chalk)] underline decoration-[var(--chalk-dim)] decoration-2 underline-offset-4">${ex.name}</a>`);
   titleRow.appendChild(link);
   if(ex.technique && ex.technique!=='straight' && !ex.supersetGroup){
     titleRow.appendChild(el(`<span class="text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full" style="background:var(--bg-2); color:var(--chalk); border:1px solid var(--chalk-dim);">${TECHNIQUE_LABELS[ex.technique]}</span>`));
@@ -3772,7 +3784,7 @@ function renderExerciseCard(day, ex, sessionLog, insideGroup){
       const pIn = el(`<input type="number" step="0.5" min="1" max="10" value="${s.rpe}" class="col-span-2 !py-1.5 text-sm">`);
       pIn.oninput = (e)=>{ s.rpe=e.target.value; queueSave(); };
       row.appendChild(wIn); row.appendChild(rIn); row.appendChild(pIn);
-      const doneBtn = el(`<button class="col-span-2 font-mono text-xs py-1.5 rounded ${s.done?'bg-[var(--ok)] text-[#111]':'btn-ghost'}">${s.done?'✓':'Log'}</button>`);
+      const doneBtn = el(`<button class="col-span-2 font-mono text-xs py-1.5 rounded ${s.done?'font-semibold':'btn-ghost'}" style="${s.done?'color:var(--chalk-text); background:transparent; border:none;':''}">${s.done?'done':'Log'}</button>`);
       doneBtn.onclick = ()=>{
         if(!s.done && !s.weight && suggested!=null){ s.weight = suggested; } // fill in the suggestion if they didn't type their own
         s.done = !s.done;
@@ -3822,7 +3834,7 @@ function renderExerciseCard(day, ex, sessionLog, insideGroup){
     const pIn = el(`<input type="number" step="0.5" min="1" max="10" value="${s.rpe}" class="col-span-2 !py-1.5 text-sm">`);
     pIn.oninput = (e)=>{ s.rpe=e.target.value; queueSave(); };
     row.appendChild(wIn); row.appendChild(rIn); row.appendChild(pIn);
-    const doneBtn = el(`<button class="col-span-2 font-mono text-xs py-1.5 rounded ${s.done?'bg-[var(--ok)] text-[#111]':'btn-ghost'}">${s.done?'✓':'Log'}</button>`);
+    const doneBtn = el(`<button class="col-span-2 font-mono text-xs py-1.5 rounded ${s.done?'font-semibold':'btn-ghost'}" style="${s.done?'color:var(--chalk-text); background:transparent; border:none;':''}">${s.done?'done':'Log'}</button>`);
     doneBtn.onclick = ()=>{
       const isLoggingNow = !s.done;
       const achievement = isLoggingNow ? checkForNewRecord(ex.name, parseFloat(s.weight)||0, parseFloat(s.reps)||0) : null;
@@ -3946,16 +3958,22 @@ function showAchievementCelebration(achievement, onComplete){
     star.style.left = Math.round(Math.random()*90)+'%';
     star.style.top = Math.round(Math.random()*90)+'%';
     star.style.fontSize = Math.round(12+Math.random()*22)+'px';
-    star.style.color = 'var(--chalk)';
+    star.style.color = '#E8B94A';
     star.style.animationDelay = (Math.random()*1.2).toFixed(2)+'s';
     starsContainer.appendChild(star);
   }
   overlay.classList.remove('hidden');
   if(navigator.vibrate) navigator.vibrate([100,50,100,50,200]);
-  setTimeout(()=>{
+  let finished = false;
+  const finish = ()=>{
+    if(finished) return;
+    finished = true;
     overlay.classList.add('hidden');
+    overlay.onclick = null;
     if(onComplete) onComplete();
-  }, 5000);
+  };
+  overlay.onclick = finish;
+  setTimeout(finish, 5000);
 }
 function beep(){
   try{
@@ -6123,7 +6141,7 @@ function renderExerciseHistorySection(exerciseNames){
     gradient.addColorStop(0, `rgba(${currentTheme().rgb},0.35)`);
     gradient.addColorStop(1, `rgba(${currentTheme().rgb},0)`);
     const pointRadii = chartSessions.map((s,i)=> s.date===bestSession.date ? 6 : (i===selectedIdxInChart ? 5 : (chartSessions.length<15?3:0)));
-    const pointColors = chartSessions.map(s=> s.date===bestSession.date ? currentTheme().chalkLight : currentTheme().chalk);
+    const pointColors = chartSessions.map(s=> s.date===bestSession.date ? ACHIEVEMENT_GOLD : currentTheme().chalk);
     const chart = new Chart(ctx, {
       type:'line',
       data:{labels:chartSessions.map(s=>s.date), datasets:[{data:chartSessions.map(s=>s.maxWeight), borderColor:currentTheme().chalk, backgroundColor:gradient, fill:true, tension:0.35, pointRadius:pointRadii, pointBackgroundColor:pointColors, pointBorderColor:currentTheme().chalk}]},
@@ -6171,7 +6189,7 @@ function renderExerciseHistorySection(exerciseNames){
   navRow.appendChild(navHead);
 
   const weightRow = el(`<div class="flex items-baseline gap-2 mb-1"></div>`);
-  weightRow.appendChild(el(`<div class="font-display text-2xl font-bold" style="color:${isBest?'var(--chalk-light)':'var(--ink-0)'};">${selSession.maxWeight}${unit}${isBest?' <span style=\"font-size:16px;\">★</span>':''}</div>`));
+  weightRow.appendChild(el(`<div class="font-display text-2xl font-bold" style="color:${isBest?'#E8B94A':'var(--ink-0)'};">${selSession.maxWeight}${unit}${isBest?' <span style=\"font-size:16px;\">★</span>':''}</div>`));
   weightRow.appendChild(el(`<div class="text-xs text-[var(--ink-2)]">${selSession.setsCount} sets · ${selSession.topSetReps} reps top set</div>`));
   navRow.appendChild(weightRow);
   navRow.appendChild(el(`<div class="text-sm mb-2">${deltaMarker}</div>`));
@@ -6193,13 +6211,13 @@ function renderExerciseHistorySection(exerciseNames){
   const stat = (label, value, color)=> el(`<div class="text-center"><div class="text-[10px] uppercase text-[var(--ink-2)] tracking-wide">${label}</div><div class="font-display text-lg font-bold mt-0.5" style="color:${color||'var(--ink-1)'};">${value}</div></div>`);
   statsRow.appendChild(stat('Sessions', allSessions.length));
   statsRow.appendChild(stat('Last 30 Days', `${last30Delta>0?'+':''}${last30Delta}${unit}`, last30Delta>0?'var(--chalk)':undefined));
-  statsRow.appendChild(stat('Best', `★ ${bestSession.maxWeight}${unit}`, 'var(--chalk-light)'));
+  statsRow.appendChild(stat('Best', `★ ${bestSession.maxWeight}${unit}`, '#E8B94A'));
   wrap.appendChild(statsRow);
 
   // suggestion — double progression framing (heavier, or same weight for one more rep)
   const heavierSuggestion = roundToPlate(bestSession.maxWeight * 1.025);
   const suggestCard = el(`<div class="flex items-start gap-2 p-3 rounded-lg mb-3" style="background:var(--bg-2);"></div>`);
-  suggestCard.appendChild(el(`<span style="color:var(--chalk);">★</span>`));
+  suggestCard.appendChild(el(`<span style="color:#E8B94A;">★</span>`));
   suggestCard.appendChild(el(`<div class="text-xs text-[var(--ink-2)]">Your best is ${bestSession.maxWeight}${unit} × ${bestSession.topSetReps}. Beat it next session: <span style="color:var(--chalk);">${heavierSuggestion}${unit}</span>, or <span style="color:var(--chalk);">${bestSession.maxWeight}${unit} × ${bestSession.topSetReps+1}</span>.</div>`));
   wrap.appendChild(suggestCard);
 
@@ -6226,7 +6244,8 @@ function renderExerciseHistorySection(exerciseNames){
     row.appendChild(el(`<div class="col-span-3 font-mono text-xs">${s.date}</div>`));
     row.appendChild(el(`<div class="col-span-2 text-center">${s.setsCount}</div>`));
     row.appendChild(el(`<div class="col-span-2 text-center">${s.topSetReps}</div>`));
-    row.appendChild(el(`<div class="col-span-3 text-right font-mono">${s.maxWeight}${unit}</div>`));
+    const isBestRow = s.date===bestSession.date;
+    row.appendChild(el(`<div class="col-span-3 text-right font-mono" style="${isBestRow?'color:#E8B94A;':''}">${isBestRow?'★ ':''}${s.maxWeight}${unit}</div>`));
     row.appendChild(el(`<div class="col-span-2 text-right text-xs" style="color:${progressColor};">${progressLabel}</div>`));
     tableWrap.appendChild(row);
   });
