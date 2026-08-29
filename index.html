@@ -5522,7 +5522,7 @@ const EXERCISE_HISTORY_RANGES = [
 ];
 let exerciseHistorySelected = null;
 let exerciseHistoryRange = 'ALL';
-let exerciseHistoryNavIdx = null; // index into the (range-filtered) session list for the set-breakdown viewer
+let exerciseHistorySelectedDate = null; // date of the session currently shown in the detail panel — date-keyed, not index, so it can't go stale/out-of-bounds if the range or exercise changes
 function getAllLoggedExerciseNames(){
   const names = new Set();
   if(Array.isArray(state.program)){
@@ -5997,7 +5997,7 @@ function renderExerciseHistorySection(exerciseNames){
     const opt = el(`<option value="${n}" ${n===exerciseHistorySelected?'selected':''}>${n}</option>`);
     select.appendChild(opt);
   });
-  select.onchange = (e)=>{ exerciseHistorySelected = e.target.value; exerciseHistoryNavIdx = null; render(); };
+  select.onchange = (e)=>{ exerciseHistorySelected = e.target.value; exerciseHistorySelectedDate = null; render(); };
   head.appendChild(select);
   wrap.appendChild(head);
 
@@ -6007,13 +6007,14 @@ function renderExerciseHistorySection(exerciseNames){
     return wrap;
   }
   const unit = state.profile.weightUnit==='lb' ? 'lb' : 'kg';
+  const bestSession = allSessions.reduce((best,s)=> s.maxWeight>best.maxWeight ? s : best, allSessions[0]);
 
   // time-range pills
   const rangeRow = el(`<div class="flex gap-1 mb-3 p-1 rounded-lg" style="background:var(--bg-2); width:fit-content;"></div>`);
   EXERCISE_HISTORY_RANGES.forEach(r=>{
     const active = exerciseHistoryRange===r.key;
     const b = el(`<button class="text-xs px-3 py-1.5 rounded-lg ${active?'':'text-[var(--ink-2)]'}" style="${active?'background:var(--chalk); color:var(--chalk-text);':''}">${r.label}</button>`);
-    b.onclick = ()=>{ exerciseHistoryRange = r.key; exerciseHistoryNavIdx = null; render(); };
+    b.onclick = ()=>{ exerciseHistoryRange = r.key; exerciseHistorySelectedDate = null; render(); };
     rangeRow.appendChild(b);
   });
   wrap.appendChild(rangeRow);
@@ -6021,8 +6022,18 @@ function renderExerciseHistorySection(exerciseNames){
   const rangedSessions = filterSessionsByRange(allSessions, exerciseHistoryRange);
   const chartSessions = rangedSessions.length ? rangedSessions : allSessions.slice(-1);
 
-  // chart — gradient-fill line, Apple Health / Stocks style
-  const canvas = el(`<canvas height="110" class="mb-3"></canvas>`);
+  // resolve which session is currently selected for the detail panel — by
+  // date, not index, so a stale selection can never point at the wrong
+  // session (or crash) if the range or exercise changes underneath it
+  if(!exerciseHistorySelectedDate || !chartSessions.some(s=>s.date===exerciseHistorySelectedDate)){
+    exerciseHistorySelectedDate = chartSessions[chartSessions.length-1].date;
+  }
+  const selectedIdxInChart = chartSessions.findIndex(s=>s.date===exerciseHistorySelectedDate);
+
+  // chart — gradient-fill line, Apple Health / Stocks style. The best-ever
+  // point gets a distinct larger/starred marker; clicking any point selects
+  // that session for the detail panel below.
+  const canvas = el(`<canvas height="110" class="mb-3" style="cursor:pointer;"></canvas>`);
   wrap.appendChild(canvas);
   const totalDelta = chartSessions.length>1 ? fmt1(chartSessions[chartSessions.length-1].maxWeight - chartSessions[0].maxWeight) : 0;
   wrap.appendChild(el(`<div class="text-center text-xs font-mono text-[var(--ink-2)] mb-3">${totalDelta>0?'+':''}${totalDelta}${unit} · ${EXERCISE_HISTORY_RANGES.find(r=>r.key===exerciseHistoryRange).label==='ALL'?'all time':'this range'}</div>`));
@@ -6031,45 +6042,78 @@ function renderExerciseHistorySection(exerciseNames){
     const gradient = ctx.createLinearGradient(0,0,0,110);
     gradient.addColorStop(0, `rgba(${currentTheme().rgb},0.35)`);
     gradient.addColorStop(1, `rgba(${currentTheme().rgb},0)`);
-    chartInstances.push(new Chart(ctx, {
+    const pointRadii = chartSessions.map((s,i)=> s.date===bestSession.date ? 6 : (i===selectedIdxInChart ? 5 : (chartSessions.length<15?3:0)));
+    const pointColors = chartSessions.map(s=> s.date===bestSession.date ? currentTheme().chalkLight : currentTheme().chalk);
+    const chart = new Chart(ctx, {
       type:'line',
-      data:{labels:chartSessions.map(s=>s.date), datasets:[{data:chartSessions.map(s=>s.maxWeight), borderColor:currentTheme().chalk, backgroundColor:gradient, fill:true, tension:0.35, pointRadius:chartSessions.length<15?3:0, pointBackgroundColor:currentTheme().chalk}]},
-      options: Object.assign(chartOpts(), {plugins:{legend:{display:false}}})
-    }));
+      data:{labels:chartSessions.map(s=>s.date), datasets:[{data:chartSessions.map(s=>s.maxWeight), borderColor:currentTheme().chalk, backgroundColor:gradient, fill:true, tension:0.35, pointRadius:pointRadii, pointBackgroundColor:pointColors, pointBorderColor:currentTheme().chalk}]},
+      options: Object.assign(chartOpts(), {
+        plugins:{legend:{display:false}},
+        onClick:(evt, elements)=>{
+          if(!elements.length) return;
+          const idx = elements[0].index;
+          exerciseHistorySelectedDate = chartSessions[idx].date;
+          render();
+        }
+      })
+    });
+    chartInstances.push(chart);
   },0);
 
-  // set-breakdown navigator for one session at a time
-  if(exerciseHistoryNavIdx===null || exerciseHistoryNavIdx<0 || exerciseHistoryNavIdx>=rangedSessions.length) exerciseHistoryNavIdx = rangedSessions.length-1;
-  if(rangedSessions.length){
-    const navSession = rangedSessions[exerciseHistoryNavIdx];
-    const navRow = el(`<div class="flex items-center justify-between p-3 rounded-lg mb-3" style="background:var(--bg-2);"></div>`);
-    const prevBtn = el(`<button class="px-2 text-[var(--ink-2)] hover:text-[var(--chalk)]" ${exerciseHistoryNavIdx<=0?'disabled style="opacity:0.3;"':''}>‹</button>`);
-    prevBtn.onclick = ()=>{ if(exerciseHistoryNavIdx>0){ exerciseHistoryNavIdx--; render(); } };
-    const nextBtn = el(`<button class="px-2 text-[var(--ink-2)] hover:text-[var(--chalk)]" ${exerciseHistoryNavIdx>=rangedSessions.length-1?'disabled style="opacity:0.3;"':''}>›</button>`);
-    nextBtn.onclick = ()=>{ if(exerciseHistoryNavIdx<rangedSessions.length-1){ exerciseHistoryNavIdx++; render(); } };
-    navRow.appendChild(prevBtn);
-    const pillsWrap = el(`<div class="flex items-center gap-3"></div>`);
-    const dateLabel = el(`<div class="text-xs font-mono text-[var(--ink-2)]">${navSession.date}</div>`);
-    const pillsRow = el(`<div class="flex gap-1"></div>`);
-    navSession.repsPerSet.forEach(r=>{
-      pillsRow.appendChild(el(`<span class="text-xs font-mono px-2 py-1 rounded-full" style="background:var(--bg-3); color:var(--chalk);">${r}</span>`));
-    });
-    pillsWrap.appendChild(dateLabel); pillsWrap.appendChild(pillsRow);
-    navRow.appendChild(pillsWrap);
-    navRow.appendChild(el(`<div class="text-xs font-mono text-[var(--ink-2)]">${navSession.totalReps} reps</div>`));
-    navRow.appendChild(nextBtn);
-    wrap.appendChild(navRow);
+  // session detail panel — set breakdown, weight (starred if it's the
+  // all-time best), and a stock-ticker-style delta marker vs the previous
+  // session. Driven by either the ‹ › steppers or a chart click, always via
+  // the same date-based selection above.
+  const selSession = chartSessions[selectedIdxInChart];
+  const fullIdx = allSessions.findIndex(s=>s.date===selSession.date);
+  const prevSession = fullIdx>0 ? allSessions[fullIdx-1] : null;
+  const isBest = selSession.date===bestSession.date;
+  let deltaMarker;
+  if(!prevSession){
+    deltaMarker = `<span style="color:var(--ink-2);">First logged session</span>`;
+  } else {
+    const delta = fmt1(selSession.maxWeight - prevSession.maxWeight);
+    if(delta>0) deltaMarker = `<span style="color:var(--chalk);">▲ +${delta}${unit}</span>`;
+    else if(delta<0){
+      const wasDeload = computePeriodization(state.profile, null, selSession.date).isDeload;
+      deltaMarker = `<span style="color:var(--ink-2);">▼ ${delta}${unit}${wasDeload?' (deload)':''}</span>`;
+    } else deltaMarker = `<span style="color:var(--ink-2);">— unchanged</span>`;
   }
+  const navRow = el(`<div class="p-3 rounded-lg mb-3" style="background:var(--bg-2);"></div>`);
+  const navHead = el(`<div class="flex items-center justify-between mb-2"></div>`);
+  const prevBtn = el(`<button class="px-2 text-[var(--ink-2)] hover:text-[var(--chalk)]" ${selectedIdxInChart<=0?'disabled style="opacity:0.3;"':''}>‹</button>`);
+  prevBtn.onclick = ()=>{ if(selectedIdxInChart>0){ exerciseHistorySelectedDate = chartSessions[selectedIdxInChart-1].date; render(); } };
+  const nextBtn = el(`<button class="px-2 text-[var(--ink-2)] hover:text-[var(--chalk)]" ${selectedIdxInChart>=chartSessions.length-1?'disabled style="opacity:0.3;"':''}>›</button>`);
+  nextBtn.onclick = ()=>{ if(selectedIdxInChart<chartSessions.length-1){ exerciseHistorySelectedDate = chartSessions[selectedIdxInChart+1].date; render(); } };
+  navHead.appendChild(prevBtn);
+  navHead.appendChild(el(`<div class="text-xs font-mono text-[var(--ink-2)]">${selSession.date}</div>`));
+  navHead.appendChild(nextBtn);
+  navRow.appendChild(navHead);
+
+  const weightRow = el(`<div class="flex items-baseline gap-2 mb-1"></div>`);
+  weightRow.appendChild(el(`<div class="font-display text-2xl font-bold" style="color:${isBest?'var(--chalk-light)':'var(--ink-0)'};">${selSession.maxWeight}${unit}${isBest?' <span style=\"font-size:16px;\">★</span>':''}</div>`));
+  weightRow.appendChild(el(`<div class="text-xs text-[var(--ink-2)]">${selSession.setsCount} sets · ${selSession.topSetReps} reps top set</div>`));
+  navRow.appendChild(weightRow);
+  navRow.appendChild(el(`<div class="text-sm mb-2">${deltaMarker}</div>`));
+
+  const pillsRow = el(`<div class="flex items-center gap-2"></div>`);
+  const pillsList = el(`<div class="flex gap-1"></div>`);
+  selSession.repsPerSet.forEach(r=>{
+    pillsList.appendChild(el(`<span class="text-xs font-mono px-2 py-1 rounded-full" style="background:var(--bg-3); color:var(--chalk);">${r}</span>`));
+  });
+  pillsRow.appendChild(pillsList);
+  pillsRow.appendChild(el(`<div class="text-xs font-mono text-[var(--ink-2)]">${selSession.totalReps} reps total</div>`));
+  navRow.appendChild(pillsRow);
+  wrap.appendChild(navRow);
 
   // stats row
-  const bestSession = allSessions.reduce((best,s)=> s.maxWeight>best.maxWeight ? s : best, allSessions[0]);
   const last30 = allSessions.filter(s=> s.date >= addDaysISO(todayISO(),-30));
   const last30Delta = last30.length>1 ? fmt1(last30[last30.length-1].maxWeight - last30[0].maxWeight) : 0;
   const statsRow = el(`<div class="grid grid-cols-3 gap-2 mb-3"></div>`);
   const stat = (label, value, color)=> el(`<div class="text-center"><div class="text-[10px] uppercase text-[var(--ink-2)] tracking-wide">${label}</div><div class="font-display text-lg font-bold mt-0.5" style="color:${color||'var(--ink-1)'};">${value}</div></div>`);
   statsRow.appendChild(stat('Sessions', allSessions.length));
   statsRow.appendChild(stat('Last 30 Days', `${last30Delta>0?'+':''}${last30Delta}${unit}`, last30Delta>0?'var(--chalk)':undefined));
-  statsRow.appendChild(stat('Best', `${bestSession.maxWeight}${unit}`, 'var(--chalk)'));
+  statsRow.appendChild(stat('Best', `★ ${bestSession.maxWeight}${unit}`, 'var(--chalk-light)'));
   wrap.appendChild(statsRow);
 
   // suggestion — double progression framing (heavier, or same weight for one more rep)
