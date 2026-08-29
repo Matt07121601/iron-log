@@ -67,6 +67,7 @@
       <button onclick="Timer.adjust(15)" class="btn btn-ghost px-5 py-3 rounded-lg text-base">+15s</button>
       <button onclick="Timer.skip()" class="btn btn-alert px-6 py-3 rounded-lg text-base">Skip</button>
     </div>
+    <div id="timerNextSetPrep" class="mt-10"></div>
   </div>
 </div>
 
@@ -3806,7 +3807,18 @@ function renderExerciseCard(day, ex, sessionLog, insideGroup){
     doneBtn.onclick = ()=>{
       s.done = !s.done;
       queueSave();
-      if(s.done){ Timer.start(ex.restSec); }
+      if(s.done){
+        let nextSetCtx = null;
+        if(idx+1 < sets.length){
+          const nextSet = sets[idx+1];
+          if(nextSet.weight===''||nextSet.weight==null){
+            const guided = techniqueGuidance[idx+1];
+            nextSet.weight = guided && guided.weightKg!=null ? guided.weightKg : s.weight;
+          }
+          nextSetCtx = {sets, idx:idx+1, unit, exName:ex.name};
+        }
+        Timer.start(ex.restSec, nextSetCtx);
+      }
       render();
     };
     row.appendChild(doneBtn);
@@ -3818,12 +3830,14 @@ function renderExerciseCard(day, ex, sessionLog, insideGroup){
 
 /* ============================= REST TIMER ============================= */
 const Timer = {
-  remaining:0, interval:null,
-  start(sec){
+  remaining:0, interval:null, nextSetCtx:null,
+  start(sec, nextSetCtx){
     clearInterval(this.interval);
     this.remaining = sec;
+    this.nextSetCtx = nextSetCtx || null;
     $('timerBar').classList.remove('hidden');
     this.tick();
+    this.renderNextSetPrep();
     this.interval = setInterval(()=>this.tick(), 1000);
   },
   tick(){
@@ -3841,7 +3855,54 @@ const Timer = {
     this.remaining--;
   },
   adjust(delta){ this.remaining = Math.max(0,this.remaining+delta); },
-  skip(){ this.remaining=0; this.tick(); }
+  skip(){ this.remaining=0; this.tick(); },
+  // Lets the client see and adjust the target weight for their NEXT set
+  // while they're resting, rather than having to work it out when they get
+  // back to the exercise card. Writes straight back to the same set object
+  // the workout view reads from, so it's already pre-filled when they return.
+  renderNextSetPrep(){
+    const el = document.getElementById('timerNextSetPrep');
+    if(!el) return;
+    el.innerHTML = '';
+    const ctx = this.nextSetCtx;
+    if(!ctx || !ctx.sets || !ctx.sets[ctx.idx]) return;
+    const unit = ctx.unit==='lb' ? 'lbs' : 'kg';
+    const nextSet = ctx.sets[ctx.idx];
+    const wrap = document.createElement('div');
+    wrap.style.textAlign = 'center';
+    const label = document.createElement('div');
+    label.className = 'label mb-2';
+    label.textContent = `Next Set (${ctx.idx+1}) — ${ctx.exName||''}`;
+    wrap.appendChild(label);
+    const row = document.createElement('div');
+    row.style.display='flex'; row.style.alignItems='center'; row.style.gap='16px'; row.style.justifyContent='center';
+    const minusBtn = document.createElement('button');
+    minusBtn.className = 'btn btn-ghost px-4 py-2 rounded-lg text-lg';
+    minusBtn.textContent = '−';
+    minusBtn.onclick = ()=> Timer.adjustNextWeight(unit==='lbs' ? -5 : -2.5);
+    const display = document.createElement('div');
+    display.className = 'font-mono font-bold';
+    display.style.fontSize = '28px'; display.style.minWidth='110px';
+    display.textContent = `${toDisplayWeight(nextSet.weight, unit)||'—'} ${unit}`;
+    const plusBtn = document.createElement('button');
+    plusBtn.className = 'btn btn-ghost px-4 py-2 rounded-lg text-lg';
+    plusBtn.textContent = '+';
+    plusBtn.onclick = ()=> Timer.adjustNextWeight(unit==='lbs' ? 5 : 2.5);
+    row.appendChild(minusBtn); row.appendChild(display); row.appendChild(plusBtn);
+    wrap.appendChild(row);
+    el.appendChild(wrap);
+  },
+  adjustNextWeight(deltaDisplay){
+    const ctx = this.nextSetCtx;
+    if(!ctx || !ctx.sets || !ctx.sets[ctx.idx]) return;
+    const unit = ctx.unit==='lb' ? 'lbs' : 'kg';
+    const nextSet = ctx.sets[ctx.idx];
+    const currentDisplay = parseFloat(toDisplayWeight(nextSet.weight, unit)) || 0;
+    const newDisplay = Math.max(0, currentDisplay + deltaDisplay);
+    nextSet.weight = toStorageWeightKg(newDisplay, unit);
+    queueSave();
+    this.renderNextSetPrep();
+  }
 };
 function beep(){
   try{
