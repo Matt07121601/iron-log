@@ -7,7 +7,7 @@
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Fraunces:ital,opsz,wght@1,9..144,400;1,9..144,500;1,9..144,600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Fraunces:ital,opsz,wght@1,9..144,400;1,9..144,500;1,9..144,600&family=Playfair+Display:ital,wght@1,500;1,600&display=swap" rel="stylesheet">
 <style>
   :root{
     --bg-0:#0A0F0C; --bg-1:#121712; --bg-2:#1A211B; --bg-3:#232B24;
@@ -19,9 +19,9 @@
     --steel:#5B6B7C;
   }
   *{box-sizing:border-box;}
-  html,body{background:var(--bg-0); color:var(--ink-0); font-family:'Inter',sans-serif; -webkit-tap-highlight-color:transparent;}
+  html,body{background:var(--bg-0); color:var(--ink-0); font-family:var(--font-body, 'Inter'),sans-serif; -webkit-tap-highlight-color:transparent;}
   .font-display{font-family:'Oswald',sans-serif; letter-spacing:0.02em;}
-  .font-serif{font-family:'Fraunces',serif; font-style:italic; font-weight:500; letter-spacing:0;}
+  .font-serif{font-family:var(--font-display, 'Fraunces'),serif; font-style:italic; font-weight:500; letter-spacing:0;}
   .font-mono{font-family:'JetBrains Mono',monospace;}
   ::-webkit-scrollbar{width:8px; height:8px;}
   ::-webkit-scrollbar-thumb{background:var(--bg-3); border-radius:4px;}
@@ -216,7 +216,7 @@ let state = {
     weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg', theme:'dark',
     measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'},
     intermittentFasting:{enabled:false, protocol:''}, usesProteinShake:false, dailyTrainingTimes:{},
-    priorityMuscles:[], avatarPhoto:null, ifThenPlan:'',
+    priorityMuscles:[], avatarPhoto:null, ifThenPlan:'', accentColor:null, displayFont:'fraunces', bodyFont:'inter',
     injuries:'', medicalConditions:'', gpClearance:false,
     targetSpec:{bodyFatPct:'', physiqueStyle:''},
     goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:'', sessionMins:'', trainingTime:'AM',
@@ -324,7 +324,7 @@ function freshClientState(){
       weightKg:'', heightFt:'', heightIn:'', bodyFatPct:'', bodyFatSource:'manual', bodyType:'', weightUnit:'kg', theme:getStoredTheme(),
       measurements:{chest:'', waist:'', thigh:'', bicep:'', unit:'cm'},
       intermittentFasting:{enabled:false, protocol:''}, usesProteinShake:false, dailyTrainingTimes:{},
-      priorityMuscles:[], avatarPhoto:null, ifThenPlan:'',
+      priorityMuscles:[], avatarPhoto:null, ifThenPlan:'', accentColor:null, displayFont:'fraunces', bodyFont:'inter',
       injuries:'', medicalConditions:'', gpClearance:false,
       targetSpec:{bodyFatPct:'', physiqueStyle:''},
       goal:'', goals:[], trainingExperience:'', work:'', activityLevel:'', daysPerWeek:'', sessionMins:'', trainingTime:'AM',
@@ -362,6 +362,7 @@ async function loadClientState(id){
   normalizeProgramRestTimes();
   ensureProgramCardio();
   ensurePriorityMuscles();
+  ensureThemeFields();
   ensureProgramExplanationSeen();
   ensureCoachChatHistory();
   ensureCheckinAdjustmentLog();
@@ -444,6 +445,11 @@ function ensureHeartRateLog(){
 }
 function ensurePriorityMuscles(){
   if(!Array.isArray(state.profile.priorityMuscles)) state.profile.priorityMuscles = [];
+}
+function ensureThemeFields(){
+  if(typeof state.profile.accentColor==='undefined') state.profile.accentColor = null;
+  if(!state.profile.displayFont) state.profile.displayFont = 'fraunces';
+  if(!state.profile.bodyFont) state.profile.bodyFont = 'inter';
 }
 function ensureProgramExplanationSeen(){
   if(typeof state.programExplanationSeen!=='boolean') state.programExplanationSeen = true; // existing clients: don't surprise them with a new gate
@@ -662,7 +668,13 @@ const ACHIEVEMENT_GOLD_LIGHT = '#F5D584';
 const DARK_PALETTE = {'--bg-0':'#0A0F0C', '--bg-1':'#121712', '--bg-2':'#1A211B', '--bg-3':'#232B24', '--line':'#2A322B', '--ink-0':'#F3F2EC', '--ink-1':'#B8B7B0', '--ink-2':'#7C7B76'};
 const LIGHT_PALETTE = {'--bg-0':'#F7F6F2', '--bg-1':'#FFFFFF', '--bg-2':'#EFEDE7', '--bg-3':'#E2DFD6', '--line':'#DAD7CD', '--ink-0':'#1B1B1E', '--ink-1':'#4A4944', '--ink-2':'#84827A'};
 function currentTheme(){
-  return THEMES[state.profile.gender] || THEMES.default;
+  const base = THEMES[state.profile.gender] || THEMES.default;
+  const customAccent = state.profile && state.profile.accentColor;
+  if(!customAccent) return base;
+  return {
+    chalk:customAccent, chalkDim:shadeHex(customAccent,-0.45), chalkLight:shadeHex(customAccent,0.35),
+    chalkText:'#0A0F0C', chalkHover:shadeHex(customAccent,0.12), rgb:hexToRgbStr(customAccent)
+  };
 }
 // Before login there's no client profile loaded yet to store a theme
 // preference on, so the gate screen remembers its own choice via
@@ -676,17 +688,52 @@ function setStoredTheme(val){
   try{ localStorage.setItem('ironlog-theme', val); }catch(e){ /* storage unavailable, ignore */ }
 }
 let preLoginTheme = getStoredTheme();
+// Lightens (positive percent) or darkens (negative) a hex color by mixing
+// toward white/black — used to derive dim/light/hover variants from
+// whatever single accent color a client picks, rather than needing four
+// hand-picked shades per option.
+function shadeHex(hex, percent){
+  const num = parseInt(hex.replace('#',''),16);
+  const mix = percent<0 ? 0 : 255;
+  const amt = Math.abs(percent);
+  const r = Math.round(((num>>16)&0xff) + (mix-((num>>16)&0xff))*amt);
+  const g = Math.round(((num>>8)&0xff) + (mix-((num>>8)&0xff))*amt);
+  const b = Math.round((num&0xff) + (mix-(num&0xff))*amt);
+  return '#'+[r,g,b].map(v=>Math.max(0,Math.min(255,v)).toString(16).padStart(2,'0')).join('');
+}
+function hexToRgbStr(hex){
+  const num = parseInt(hex.replace('#',''),16);
+  return `${(num>>16)&0xff},${(num>>8)&0xff},${num&0xff}`;
+}
+const FONT_OPTIONS = {
+  display: {fraunces:"'Fraunces'", oswald:"'Oswald'", playfair:"'Playfair Display'"},
+  body: {inter:"'Inter'", system:"system-ui", georgia:"Georgia"}
+};
 function applyTheme(){
   const t = currentTheme();
   const s = document.documentElement.style;
-  s.setProperty('--chalk', t.chalk);
-  s.setProperty('--chalk-dim', t.chalkDim);
-  s.setProperty('--chalk-light', t.chalkLight);
-  s.setProperty('--chalk-text', t.chalkText);
-  s.setProperty('--chalk-hover', t.chalkHover);
+  const customAccent = state.profile && state.profile.accentColor;
+  if(customAccent){
+    s.setProperty('--chalk', customAccent);
+    s.setProperty('--chalk-dim', shadeHex(customAccent, -0.45));
+    s.setProperty('--chalk-light', shadeHex(customAccent, 0.35));
+    s.setProperty('--chalk-text', '#0A0F0C');
+    s.setProperty('--chalk-hover', shadeHex(customAccent, 0.12));
+    s.setProperty('--chalk-rgb', hexToRgbStr(customAccent));
+  } else {
+    s.setProperty('--chalk', t.chalk);
+    s.setProperty('--chalk-dim', t.chalkDim);
+    s.setProperty('--chalk-light', t.chalkLight);
+    s.setProperty('--chalk-text', t.chalkText);
+    s.setProperty('--chalk-hover', t.chalkHover);
+  }
   const effectiveTheme = (session.role && state.profile && state.profile.theme) ? state.profile.theme : preLoginTheme;
   const palette = effectiveTheme==='light' ? LIGHT_PALETTE : DARK_PALETTE;
   Object.entries(palette).forEach(([k,v])=> s.setProperty(k, v));
+  const displayFont = (state.profile && FONT_OPTIONS.display[state.profile.displayFont]) || FONT_OPTIONS.display.fraunces;
+  const bodyFont = (state.profile && FONT_OPTIONS.body[state.profile.bodyFont]) || FONT_OPTIONS.body.inter;
+  s.setProperty('--font-display', displayFont);
+  s.setProperty('--font-body', bodyFont);
 }
 function resizeImageFile(file, maxDim=640){
   return new Promise((resolve,reject)=>{
@@ -2300,7 +2347,7 @@ function renderHeader(){
     <div class="flex items-center justify-between">
       <div>
         <div class="label">Iron Log</div>
-        <h1 class="font-display text-2xl sm:text-3xl font-bold">Hey ${state.profile.name || 'Athlete'}</h1>
+        <h1 class="font-serif text-3xl sm:text-4xl">Hey ${state.profile.name || 'Athlete'}</h1>
       </div>
       <div class="flex items-center gap-3">
         <div class="hidden sm:block text-xs font-mono text-[var(--ink-2)]">
@@ -3431,16 +3478,54 @@ function renderTrainingCalendar(){
   return wrap;
 }
 
+function computeDaySetsProgress(day){
+  let total=0, done=0;
+  const log = state.logs.workouts[day.name+'-'+todayISO()];
+  (day.exercises||[]).forEach(ex=>{
+    if(ex.muscle==='Conditioning') return;
+    total += ex.sets;
+    if(log && log.exercises && log.exercises[ex.name]){
+      done += log.exercises[ex.name].filter(s=>s.done).length;
+    }
+  });
+  return {done, total};
+}
 function renderWorkoutView(){
   const wrap = el(`<div></div>`);
   const isCoachEditor = session.role==='coach' && session.viewingAsCoach;
-  const dayTabs = el(`<div class="flex gap-1 overflow-x-auto mb-3 -mx-1 px-1"></div>`);
+
+  // Segmented day selector — each program day gets its own labelled segment;
+  // the active day's segment fills proportionally to sets actually logged
+  // for it today, the rest sit as plain unfilled track.
+  const selectorWrap = el(`<div class="mb-4"></div>`);
+  const nameRow = el(`<div class="flex gap-4 overflow-x-auto mb-2 -mx-1 px-1"></div>`);
   state.program.forEach((d,i)=>{
-    const b = el(`<button class="tab-btn px-3 py-2 border-b-2 whitespace-nowrap ${state.activeDayIndex===i?'active':''}">${d.name}</button>`);
+    const active = state.activeDayIndex===i;
+    const b = el(`<button class="font-serif text-lg whitespace-nowrap" style="color:${active?'var(--ink-0)':'var(--ink-2)'}; background:transparent; border:none; padding:0;">${d.name}</button>`);
     b.onclick = ()=>{ state.activeDayIndex=i; if(!workoutEditMode) state.showingQuoteFor=i; render(); };
-    dayTabs.appendChild(b);
+    nameRow.appendChild(b);
   });
-  wrap.appendChild(dayTabs);
+  selectorWrap.appendChild(nameRow);
+
+  const trackRow = el(`<div class="flex items-center gap-3"></div>`);
+  const track = el(`<div class="flex gap-1" style="flex:1;"></div>`);
+  const activeProgress = computeDaySetsProgress(state.program[state.activeDayIndex]);
+  state.program.forEach((d,i)=>{
+    const seg = el(`<div style="flex:1; height:4px; border-radius:2px; background:var(--bg-3); overflow:hidden; position:relative;"></div>`);
+    if(i===state.activeDayIndex && activeProgress.total>0){
+      const pct = Math.min(100, Math.round((activeProgress.done/activeProgress.total)*100));
+      seg.appendChild(el(`<div style="position:absolute; inset:0; width:${pct}%; background:var(--chalk); border-radius:2px;"></div>`));
+    } else if(i<state.activeDayIndex){
+      seg.appendChild(el(`<div style="position:absolute; inset:0; background:var(--line);"></div>`));
+    }
+    track.appendChild(seg);
+  });
+  trackRow.appendChild(track);
+  if(activeProgress.total>0){
+    trackRow.appendChild(el(`<div class="text-xs font-mono whitespace-nowrap" style="color:var(--ink-2);">${activeProgress.done} of ${activeProgress.total} sets</div>`));
+  }
+  selectorWrap.appendChild(trackRow);
+  wrap.appendChild(selectorWrap);
 
   const controlsRow = el(`<div class="flex items-center justify-between mb-4"></div>`);
   const unitToggle = el(`<div class="flex gap-1 text-xs"></div>`);
@@ -4446,7 +4531,7 @@ function renderNutrition(){
     wrap.appendChild(banner);
   }
 
-  wrap.appendChild(el(`<h2 class="font-display text-2xl font-bold mb-1">Nutrition Targets</h2>`));
+  wrap.appendChild(el(`<h2 class="font-serif text-3xl mb-1">Nutrition Targets</h2>`));
   wrap.appendChild(el(`<p class="text-sm text-[var(--ink-2)] mb-2">Based on Mifflin-St Jeor BMR, activity-adjusted TDEE, and ISSN/ACSM protein guidance (1.6–2.2g/kg bodyweight).</p>`));
   if(state.profile.bodyType){
     const btLabel = BODY_TYPES.find(b=>b.key===state.profile.bodyType).label;
@@ -4715,7 +4800,7 @@ function mealTimingHTML(time){
 /* ============================= TRACKER ============================= */
 function renderTracker(){
   const wrap = el(`<div></div>`);
-  wrap.appendChild(el(`<h2 class="font-display text-2xl font-bold mb-1">Daily Tracker</h2>`));
+  wrap.appendChild(el(`<h2 class="font-serif text-3xl mb-1">Daily Tracker</h2>`));
   wrap.appendChild(el(`<p class="text-sm text-[var(--ink-2)] mb-6">Log today's food intake and see it stack against your macro targets.</p>`));
 
   const t = state.targets[profileCalorieKey(state.profile)];
@@ -5686,7 +5771,7 @@ function renderProfileView(){
   avatarWrap.appendChild(avatarEditBtn);
   idCard.appendChild(avatarWrap);
   const idText = el(`<div></div>`);
-  idText.appendChild(el(`<div class="font-display text-xl font-bold">${p.name || 'Athlete'}</div>`));
+  idText.appendChild(el(`<div class="font-serif text-2xl">${p.name || 'Athlete'}</div>`));
   const memberSince = p.programStartDate ? new Date(p.programStartDate+'T00:00:00').toLocaleDateString(undefined,{month:'long', year:'numeric'}) : null;
   idText.appendChild(el(`<div class="text-xs text-[var(--ink-2)] mt-0.5">${memberSince ? 'Member since '+memberSince : ''}</div>`));
   if(p.avatarPhoto){
@@ -5762,6 +5847,37 @@ function renderProfileView(){
   unitBtn.onclick = ()=>{ p.weightUnit = (p.weightUnit==='lb') ? 'kg' : 'lb'; queueSave(); render(); };
   unitRow.appendChild(unitBtn);
   settingsCard.appendChild(unitRow);
+
+  const accentRow = el(`<div class="py-2 border-t border-[var(--line)] mt-1"></div>`);
+  accentRow.appendChild(el(`<div class="text-sm mb-2">Accent</div>`));
+  const swatchRow = el(`<div class="flex gap-2"></div>`);
+  const ACCENT_OPTIONS = [
+    {key:null, hex:'#3DDC97'}, {key:'#4A9EFF', hex:'#4A9EFF'}, {key:'#E0218F', hex:'#E0218F'},
+    {key:'#E85D3F', hex:'#E85D3F'}, {key:'#E8B94A', hex:'#E8B94A'}
+  ];
+  ACCENT_OPTIONS.forEach(opt=>{
+    const active = (p.accentColor||null)===opt.key;
+    const swatch = el(`<button style="width:28px; height:28px; border-radius:50%; background:${opt.hex}; border:2px solid ${active?'var(--ink-0)':'transparent'}; cursor:pointer;"></button>`);
+    swatch.onclick = ()=>{ p.accentColor = opt.key; applyTheme(); queueSave(); render(); };
+    swatchRow.appendChild(swatch);
+  });
+  accentRow.appendChild(swatchRow);
+  settingsCard.appendChild(accentRow);
+
+  const fontPicker = (label, field, options, defaultKey)=>{
+    const row = el(`<div class="flex items-center justify-between py-2 border-t border-[var(--line)]"></div>`);
+    row.appendChild(el(`<span class="text-sm">${label}</span>`));
+    const select = el(`<select class="text-xs"></select>`);
+    Object.entries(options).forEach(([key,label2])=>{
+      select.appendChild(el(`<option value="${key}" ${((p[field]||defaultKey)===key)?'selected':''}>${label2}</option>`));
+    });
+    select.onchange = (e)=>{ p[field] = e.target.value; applyTheme(); queueSave(); render(); };
+    row.appendChild(select);
+    return row;
+  };
+  settingsCard.appendChild(fontPicker('Display Font', 'displayFont', {fraunces:'Fraunces', oswald:'Oswald', playfair:'Playfair Display'}, 'fraunces'));
+  settingsCard.appendChild(fontPicker('Body Font', 'bodyFont', {inter:'Inter', system:'System', georgia:'Georgia'}, 'inter'));
+
   wrap.appendChild(settingsCard);
 
   if(session.role==='client'){
@@ -5789,7 +5905,7 @@ function renderCoachView(){
 
   if(coachSubView==='reflect'){ wrap.appendChild(renderReflectSection()); return wrap; }
 
-  wrap.appendChild(el(`<div class="mb-4"><h1 class="font-display text-2xl font-bold">Ask Your Coach</h1><p class="text-sm text-[var(--ink-2)] mt-1">Evidence-based answers on training, form, and recovery — a curated knowledge base, not a live person, so keep anything specific to your own situation for your actual coach.</p></div>`));
+  wrap.appendChild(el(`<div class="mb-4"><h1 class="font-serif text-3xl">Ask Your Coach</h1><p class="text-sm text-[var(--ink-2)] mt-1">Evidence-based answers on training, form, and recovery — a curated knowledge base, not a live person, so keep anything specific to your own situation for your actual coach.</p></div>`));
 
   const suggestions = ['What is RPE?','Why do I have a deload week?','Should I train through soreness?','What\'s good squat form?'];
   const chipRow = el(`<div class="flex flex-wrap gap-2 mb-4"></div>`);
@@ -5864,7 +5980,7 @@ const REFLECTION_PROMPTS = [
 let reflectPromptIndex = 0;
 function renderReflectSection(){
   const wrap = el(`<div></div>`);
-  wrap.appendChild(el(`<div class="mb-4"><h1 class="font-display text-2xl font-bold">Reflect</h1><p class="text-sm text-[var(--ink-2)] mt-1">A private space to think out loud — no advice, no answers, just somewhere to put it. Nothing here is shared with your coach unless you choose to.</p></div>`));
+  wrap.appendChild(el(`<div class="mb-4"><h1 class="font-serif text-3xl">Reflect</h1><p class="text-sm text-[var(--ink-2)] mt-1">A private space to think out loud — no advice, no answers, just somewhere to put it. Nothing here is shared with your coach unless you choose to.</p></div>`));
 
   const promptCard = el(`<div class="card p-4 mb-3"></div>`);
   const promptRow = el(`<div class="flex items-start justify-between gap-2 mb-3"></div>`);
@@ -5921,7 +6037,7 @@ function renderProgress(){
   chartInstances.forEach(c=>c.destroy());
   chartInstances = [];
   const wrap = el(`<div></div>`);
-  wrap.appendChild(el(`<h2 class="font-display text-2xl font-bold mb-1">Progress</h2>`));
+  wrap.appendChild(el(`<h2 class="font-serif text-3xl mb-1">Progress</h2>`));
   wrap.appendChild(el(`<p class="text-sm text-[var(--ink-2)] mb-6">Weekly trends across your logged sessions — top weight per session confirms progressive overload.</p>`));
 
   if((state.checkinAdjustmentLog||[]).length>0){
@@ -6471,7 +6587,7 @@ function renderNotificationBell(){
 /* ============================= PHOTOS / AI COMPARISON ANALYSIS ============================= */
 function renderPhotos(){
   const wrap = el(`<div></div>`);
-  wrap.appendChild(el(`<h2 class="font-display text-2xl font-bold mb-1">Physique Photos</h2>`));
+  wrap.appendChild(el(`<h2 class="font-serif text-3xl mb-1">Physique Photos</h2>`));
   wrap.appendChild(el(`<p class="text-sm text-[var(--ink-2)] mb-6 max-w-xl">Full body length, three angles, no face. Photos are shown here for you and your coach to compare directly — the comparison analysis below is calculated from your entered stats and measurements (not a visual read of the images), so add a body fat % or a few measurements for the most accurate picture.</p>`));
 
   /* ---- Starting point (baseline) ---- */
